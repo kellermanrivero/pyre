@@ -1,0 +1,11 @@
+# The pyre test set: MDT02 sheets (IGN, 2 m, WGS84 COG), read from
+# /Volumes/KELLERMAN/PublicData/mdt02/PUBLICACION_CNIG_DATOS_VARIOS_MDT02_WGS84/
+# One file name a line. The note after "#" says why each one is in the set.
+MDT02-WGS84-0559-2-COB2.tif   # city: Madrid, north-east (Chamartín, Barajas)
+MDT02-WGS84-0762-1-COB2.tif   # flat: La Mancha (Tomelloso)
+MDT02-WGS84-0737-2-COB2.tif   # flat: La Mancha (Alcázar de San Juan)
+MDT02-WGS84-0056-1-COB2.tif   # mountains: Picos de Europa (Cabrales)
+MDT02-WGS84-0180-2-COB2.tif   # high mountains: Pyrenees (Maladeta, Aneto)
+MDT02-WGS84-0014-1-COB2.tif   # coast with sea: Asturias (Gijón)
+MDT02-WGS84-0722-2-COB2.tif   # coast with sea: Valencia (the city and the port)
+MDT02-WGS84-0001-2-COB2.tif   # many no-data nodes: Estaca de Bares, Galicia (sea outside the land)
