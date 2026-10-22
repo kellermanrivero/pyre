@@ -161,12 +161,17 @@ bool SheetSet::touches(const LocalGrid& g, double x0, double y0, double step, st
 
 std::size_t SheetSet::sample(const LocalGrid& g, double x0, double y0, double step, std::uint32_t side,
                              std::vector<double>& out) const {
-    const std::size_t n = side;
-    out.assign(n * n, NAN);
     // The degrees of each column and each row: lon depends on x alone, lat on y alone.
-    std::vector<double> lon(n), lat(n);
-    for (std::size_t i = 0; i < n; ++i) lon[i] = g.lonOf(x0 + double(i) * step);
-    for (std::size_t j = 0; j < n; ++j) lat[j] = g.latOf(y0 + double(j) * step);
+    std::vector<double> lon(side), lat(side);
+    for (std::size_t i = 0; i < side; ++i) lon[i] = g.lonOf(x0 + double(i) * step);
+    for (std::size_t j = 0; j < side; ++j) lat[j] = g.latOf(y0 + double(j) * step);
+    return sampleLonLat(lon, lat, out);
+}
+
+std::size_t SheetSet::sampleLonLat(const std::vector<double>& lon, const std::vector<double>& lat, std::vector<double>& out) const {
+    const std::size_t nx = lon.size(), ny = lat.size();
+    out.assign(nx * ny, NAN);
+    if (nx == 0 || ny == 0) return 0;
 
     // The candidates, in the order of the set (of path), and the window of each.
     struct Candidate {
@@ -182,15 +187,15 @@ std::size_t SheetSet::sample(const LocalGrid& g, double x0, double y0, double st
         const double w = double(s.info.width), h = double(s.info.height);
         Candidate c;
         c.sheet = k;
-        c.fx.resize(n);
-        c.mx.resize(n);
-        c.fy.resize(n);
-        c.my.resize(n);
-        for (std::size_t i = 0; i < n; ++i) {
+        c.fx.resize(nx);
+        c.mx.resize(nx);
+        c.fy.resize(ny);
+        c.my.resize(ny);
+        for (std::size_t i = 0; i < nx; ++i) {
             c.fx[i] = (lon[i] - s.lon0) / s.stepLon - 0.5;
             c.mx[i] = std::min(c.fx[i], w - 1 - c.fx[i]);
         }
-        for (std::size_t j = 0; j < n; ++j) {
+        for (std::size_t j = 0; j < ny; ++j) {
             c.fy[j] = (s.lat0 - lat[j]) / s.stepLat - 0.5;
             c.my[j] = std::min(c.fy[j], h - 1 - c.fy[j]);
         }
@@ -211,9 +216,9 @@ std::size_t SheetSet::sample(const LocalGrid& g, double x0, double y0, double st
     std::size_t count = 0;
     std::vector<std::pair<double, std::size_t>> order;
     order.reserve(cands.size());
-    for (std::size_t j = 0; j < n; ++j) {
-        double* row = out.data() + j * n;
-        for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t j = 0; j < ny; ++j) {
+        double* row = out.data() + j * nx;
+        for (std::size_t i = 0; i < nx; ++i) {
             // The candidates that contain the node, the deepest first; on a tie, by path.
             order.clear();
             for (std::size_t q = 0; q < cands.size(); ++q) {

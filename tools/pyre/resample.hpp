@@ -59,6 +59,12 @@ public:
     std::size_t sample(const LocalGrid& g, double x0, double y0, double step, std::uint32_t side,
                        std::vector<double>& out) const;
 
+    /// Samples a lattice in degrees: node (i, j) at (lon[i], lat[j]). lon must
+    /// rise with i and lat with j (j = 0 is the south row). `out` gets
+    /// lon.size() × lat.size() values, row j major; NaN where there is no data.
+    /// Returns the count of nodes with data. Thread-safe.
+    std::size_t sampleLonLat(const std::vector<double>& lon, const std::vector<double>& lat, std::vector<double>& out) const;
+
     /// True if a source can have data in the square (a quick test before sample).
     bool touches(const LocalGrid& g, double x0, double y0, double step, std::uint32_t side) const;
 

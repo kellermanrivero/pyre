@@ -23,6 +23,8 @@ This document gives the `.pyre` file byte by byte. The code that writes and read
 ```
 offset 0             the header: the fixed part (128 B), the grids (128 B each), the text
 headerBytes          the tiles, one after another; each tile is its head, then its blocks
+                     (and, if the file has layers, each layer's tile after its tile)
+                     the sections, then the section table (only if sectionCount > 0)
 indexOffset          the index: the entries (48 B each), then the block ends (4 B each)
 fileBytes            the end of the file
 ```
@@ -55,9 +57,11 @@ HTTP, a client needs three range reads: the header, the index, then the block.
 | 72 | u64 | indexOffset | Where the index starts. A multiple of 8. |
 | 80 | u64 | indexBytes | The size of the index: tileCount × (48 + 4 × blocks a tile). |
 | 88 | u32 | indexCrc | CRC-32C of the index (all indexBytes). |
-| 92 | u32 | — | Reserved. |
+| 92 | u32 | sectionCount | The count of sections (section 9). 0: the file has none. |
 | 96 | u64 | fileBytes | The size of the file. A reader uses it to find a cut file. |
-| 104 | u8[24] | — | Reserved. |
+| 104 | u64 | sectionTable | Where the section table starts. A multiple of 8. 0 if sectionCount is 0. |
+| 112 | u32 | sectionTableCrc | CRC-32C of the section table (sectionCount × 32 bytes). 0 if sectionCount is 0. |
+| 116 | u8[12] | — | Reserved. |
 
 The rules of the parameters (a reader refuses a file that breaks them):
 
@@ -267,6 +271,11 @@ file:
   is between the header and the index; headBytes ≤ totalBytes; the block ends go up
   and the last is totalBytes; the tile's epsilon is from 0 to 2^29.
 
+- the section table and each section: inside the file, before the index, with the
+  right CRC; a type that the reader does not know is refused if it is marked required,
+  else skipped; each layer's descriptor follows the rules of section 9.2, and its index
+  passes the same checks as the main index.
+
 The tile CRCs are not checked at open, so that a reader does not read every tile.
 Call `Reader::verifyTile` before a tile is used. The decoder is safe without it (it
 never reads outside a stream), but damaged bytes give wrong heights.
@@ -276,3 +285,69 @@ never reads outside a stream), but damaged bytes give wrong heights.
 Version 1 is this document. A change that an old reader cannot read gets a new
 version number. A reader refuses a version that it does not know, with a message that
 gives both versions.
+
+A new feature that old readers may ignore is a new section type (section 9), not a
+new version. Files without sections have the same bytes as before sections existed:
+sectionCount, sectionTable and sectionTableCrc were reserved bytes, and they are 0.
+
+## 9. Sections
+
+### 9.1 The section table (32 bytes a section)
+
+The section table is at sectionTable, after the tiles and the sections and before the
+index. Section k is at sectionTable + 32 × k:
+
+| Offset | Type | Name | Meaning |
+|---:|---|---|---|
+| 0 | u32 | type | 1 = a layer (section 9.2). Other values are for later. |
+| 4 | u32 | flags | Bit 0: required. A reader that does not know the type must refuse the file. Without it, the reader skips the section. Other bits are 0. |
+| 8 | u64 | offset | Where the section's bytes start. A multiple of 8, after the header and before the section table. |
+| 16 | u64 | bytes | The size of the section. |
+| 24 | u32 | crc | CRC-32C of the section's bytes. |
+| 28 | u32 | — | Reserved. |
+
+The tiles (of the heights and of every layer) are before the first section.
+
+### 9.2 A layer (section type 1)
+
+A layer is another integer grid on the file's tiles: for example the height of the
+objects above the ground. It has its own tiles, coded as the heights are (section 5),
+with its own parameters. A reader that needs only the heights never reads it.
+
+Layer node (i, j) of a tile is node (stride × i, stride × j) of the tile. A layer tile
+has S / stride cells a side, blocks of B / stride cells, a base step of G / stride and
+the file's blockLevels. Its values are integers: a value v means v × unit.
+
+The section starts with a descriptor (64 bytes):
+
+| Offset | Type | Name | Meaning |
+|---:|---|---|---|
+| 0 | u8 | kind | What the values are (the table below). 1 to 255; 0 is never a layer. |
+| 1 | u8[3] | — | Reserved. |
+| 4 | u32 | stride | A power of 2 that divides S, B and G, and leaves G / stride ≥ 2^blockLevels. |
+| 8 | f64 | unit | The value of 1, in vertical units. More than 0. |
+| 16 | i32 | epsilon | The error limit, in units, from 0 to 2^29. |
+| 20 | u32 | method | The coding method of the layer's tiles (section 6). |
+| 24 | f64 | param | A value for the kind (the table below). |
+| 32 | u64 | tileCount | The count of the layer's tiles (and entries). |
+| 40 | u32 | entryBytes | The size of one entry: 48 now. A reader reads the first 48 bytes of each and skips the rest, so later versions can make entries longer. |
+| 44 | u8[20] | — | Reserved. |
+
+Then the layer's index, as the main index (section 4) but with the layer's
+parameters: tileCount entries of entryBytes each, in the same order (grid, row,
+column), then (S / stride / (B / stride))² block ends for each entry. An entry gives a
+layer tile's place, bytes, min and max (in units), epsilon and CRC. A layer can have a
+tile where the heights have none, and the other way round.
+
+The section's size is 64 + tileCount × (entryBytes + 4 × blocks a tile).
+
+The kinds:
+
+| Kind | Name | The values | param |
+|---:|---|---|---|
+| 0 | heights | The main heights (the tiles and the index of sections 3 to 5). Never a layer. | — |
+| 1 | height above ground | The height of objects (buildings, trees) above the ground: a surface model minus the file's heights, the largest in the stride × stride nodes round each layer node. 0 is the ground. | Heights under it were set to 0 (for example 3 m). |
+| 2–255 | — | For later. A reader that does not know a kind can skip the layer. | — |
+
+The tool writes kind 1 in a second pass: `pyre encode <surface rasters> --layer-of
+<file.pyre> --kind 1` (README.md).

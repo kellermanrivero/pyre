@@ -37,7 +37,8 @@ if(PYRE_BUILD_TOOL)
   # The tool's parts, shared by the tool and the tests.
   add_library(pyretool STATIC tools/pyre/grid.cpp tools/pyre/commands.cpp tools/pyre/compare.cpp tools/pyre/tiff.cpp
               tools/pyre/tiff_codec.cpp tools/pyre/tiff_write.cpp tools/pyre/resample.cpp tools/pyre/alt.cpp
-              tools/pyre/tile_epsilon.cpp tools/pyre/source.cpp tools/pyre/pyre_source.cpp tools/pyre/overlay.cpp)
+              tools/pyre/tile_epsilon.cpp tools/pyre/source.cpp tools/pyre/pyre_source.cpp tools/pyre/overlay.cpp
+              tools/pyre/surface.cpp tools/pyre/layer.cpp)
   target_include_directories(pyretool PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/pyre)
   target_link_libraries(pyretool PUBLIC pyre ZLIB::ZLIB)
   target_compile_options(pyretool PRIVATE ${PYRE_WARNINGS})

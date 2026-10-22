@@ -27,8 +27,14 @@ the tool output on an Apple M1 Pro (10 cores), macOS, Apple clang 21, CMake 4.4.
 6. **Per-tile ε and overlays in `pyre-resample`**, and **a pyre file as a source**
    (`PyreSource`). With these, an archive of the MDT02 in pyre replaces the TIFFs, and
    AirKid's airfield surfaces go into the file before it is encoded (section 7).
-7. **The tests** (`tests/`): 5 suites with their own small harness and CTest.
-8. **The documents**: `README.md`, `docs/FORMAT.md`, `docs/READERS.md` and this
+7. **Sections and layers** in format version 1. The reserved header bytes now point to a
+   section table, so the format can grow; files without sections keep their bytes, and
+   the Spain archive stays valid. A layer (section type 1) is another integer grid on
+   the tiles with its own stride, quantum and error; its kind is a u8 (1: the height of
+   objects above the ground). `pyre encode … --layer-of <file> --kind 1` adds it in a
+   second pass from a surface model, with the file's own heights as the ground.
+8. **The tests** (`tests/`): 5 suites with their own small harness and CTest.
+9. **The documents**: `README.md`, `docs/FORMAT.md`, `docs/READERS.md` and this
    report.
 
 ### Decisions
@@ -46,6 +52,9 @@ the tool output on an Apple M1 Pro (10 cores), macOS, Apple clang 21, CMake 4.4.
 | The quantiser | `round(v · 100)`, not `round(v / 0.01)`, when 1 / q is a whole number | One rounding, not two; the reference packs do the same. The ε sweep gave the same bytes before and after. |
 | Overlays | `--overlay <raster>`: rasters on the grid whose values replace the samples before encoding | The owner chose this way (option 2) for the airfields: the error limit then holds against the smoothed ground, and a decoder needs no extra step. It also fills holes. |
 | A pyre file as a source | `PyreSource`; a value is the float32 nearest to height × unit | So that the owner can delete the MDT02 and keep a pyre archive. The MDT02 values are whole mm, so an archive in mm (ε = 0) reads back bit for bit. |
+| Layers | Sections in the reserved header bytes, not a version 2 | The owner wanted version 1 kept and room to grow. Old files and old readers keep working. |
+| Height above ground | A second pass (`--layer-of`), not a second input of `encode` | The owner chose it: no pairs of MDT/MDS files. The ground is the decoded heights, so under a hole it is the prediction and buildings there keep a height. |
+| Its values | The largest h in 2 × 2 nodes (4 m on the MDT02); 0 under 3 m; else whole steps of 3 m | The owner's choice: configurable, 3 m by default; the resolution follows the input. |
 | Per-tile ε in `pyre-resample` | `--tile-epsilon <file>` (tiles or boxes in degrees) and `--tile-epsilon-from <pack.alt>`; the smallest ε wins | The owner asked for it, so that AirKid can keep tiles finer (airfields). The format already had a per-tile ε. |
 | Local grid tiles | Node (0, 0) is the centre; tiles keep their places (negative too) through `tileI0`, `tileJ0` | A tile of the pyre file and a tile of the pack have the same (i, j). `decode` now handles a grid whose first tile is not (0, 0). |
 
@@ -78,6 +87,9 @@ the tool output on an Apple M1 Pro (10 cores), macOS, Apple clang 21, CMake 4.4.
 | `tools/pyre/overlay.cpp`, `.hpp` | The overlays of `pyre-resample`. |
 | `tools/pyre/pyre_source.cpp`, `.hpp` | `PyreSource`: one grid of a pyre file as a source. |
 | `tools/pyre/source.cpp` | `openSource`: the reader for each file extension. |
+| `tools/pyre/surface.cpp`, `.hpp` | Layer kind 1: the height above the ground, from a surface model and the file's heights. |
+| `tools/pyre/layer.cpp` | The second pass (`--layer-of`) and `verify --layer`. |
+| `scripts/add-layer.sh` | The second pass on a folder of `.pyre` files, each checked before it replaces the file. |
 | `tools/pyre-resample/main.cpp` | The `pyre-resample` tool. |
 | `tests/check.hpp`, `synth.hpp` | The test harness, and synthetic terrain. |
 | `tests/test_codec.cpp` | The coder, the quantiser, the walk, random access, levels, cracks, damage, properties. |
@@ -127,9 +139,9 @@ Thus a file holds one grid for each sheet. The overlaps are stored twice.
 | Suite | Result |
 |---|---|
 | `test_codec` | 20 tests, 0 failed |
-| `test_container` | 8 tests, 0 failed |
+| `test_container` | 12 tests, 0 failed |
 | `test_tiff` | 13 tests, 0 failed |
-| `test_resample` | 16 tests, 0 failed |
+| `test_resample` | 17 tests, 0 failed |
 | `test_reference` | 1 test, 0 failed |
 | All 5 under AddressSanitizer and UndefinedBehaviorSanitizer (`build-asan`) | 100 % passed (249.3 s) |
 | `pyre-resample` and `pyre compare` on all of Madrid (2003 tiles, 4001 sheets) under the sanitizers | No report. The file is the same, byte for byte, as from the normal build; `compare` gives the same result. |
@@ -258,19 +270,25 @@ Worse:
 6. **The size of the archive** is the owner's choice (the table in section 7): exact
    (mm) is 2.6 times smaller than the TIFFs; hundreds of times smaller is only possible
    for the game files, or for an archive with an error of about 0.5 m.
-7. **The resampler reads geographic sources only.** A projected source needs a CRS
+7. **Layers are not carried by `pyre-resample` yet.** A local grid made from an archive
+   with layers has the heights only. The second pass works on a local grid too (the
+   surface is sampled at its nodes).
+8. **The coarse levels of a layer are samples**, as for the heights. Far-away buildings
+   would need the largest value of each cell instead: a later codec option.
+9. **Layer kind 1 has trees as well as buildings**, because the MDS02 has both.
+10. **The resampler reads geographic sources only.** A projected source needs a CRS
    transform, which is not built.
-8. **The GeoTIFF of a local grid** carries the WKT as a citation only (no GeoKeys for
+11. **The GeoTIFF of a local grid** carries the WKT as a citation only (no GeoKeys for
    the projection). GDAL is not on this machine, so I could not check how GDAL reads it.
-9. **No-data on a local grid** stays no-data unless an overlay gives values. The
+12. **No-data on a local grid** stays no-data unless an overlay gives values. The
    reference fills those nodes from the data round them, and smooths the ground under
    airfields; with pyre, AirKid gives both as overlays, and keeps the airfield tiles
    finer with a per-tile ε. The holes are under large
    buildings (31 of 32 patches in Madrid; the MDS02 is 8 to 37 m above the ground there).
    A decoder already gets a smooth value under each hole (its prediction), except a hole
    at a tile corner, which decodes to 0.
-10. **A `Source` for the `.alt` packs** (to convert them to pyre files) is not built. The
+13. **A `Source` for the `.alt` packs** (to convert them to pyre files) is not built. The
    pack reader is there.
-11. **The slowest single block** in a run is noisy (up to 15.8 ms in one run with
+14. **The slowest single block** in a run is noisy (up to 15.8 ms in one run with
    B = 500, against a mean of 2.5 ms). The README gives only the means.
-12. **Section 11, question 2** (pyre in the game) is for the owner.
+15. **Section 11, question 2** (pyre in the game) is for the owner.

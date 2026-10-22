@@ -32,8 +32,12 @@ class PyreSource final : public Source {
 public:
     static constexpr std::size_t kDefaultCacheTiles = 16;
 
-    /// Opens "file.pyre" or "file.pyre#K". Throws SourceError.
-    static std::unique_ptr<PyreSource> open(const std::string& path, std::size_t cacheTiles = kDefaultCacheTiles);
+    /// Opens "file.pyre" or "file.pyre#K". With `predictedHoles`, a hole reads
+    /// as the value the decoder puts there (its prediction from the nodes round
+    /// it) instead of NaN; a tile that is not in the file is still NaN.
+    /// Throws SourceError.
+    static std::unique_ptr<PyreSource> open(const std::string& path, std::size_t cacheTiles = kDefaultCacheTiles,
+                                            bool predictedHoles = false);
     /// The count of grids in a .pyre file. Throws SourceError.
     static std::size_t gridCount(const std::string& file);
 

@@ -22,7 +22,8 @@ namespace pyre::tool {
 
 bool takesValue(const std::string& o) {
     static const std::set<std::string> v = {"output", "epsilon", "unit", "tile", "block", "base", "block-levels",
-                                            "bbox", "threads", "level", "grid", "nodata", "max-tiles"};
+                                            "bbox", "threads", "level", "grid", "nodata", "max-tiles", "layer",
+                                            "layer-of", "kind", "min", "stride"};
     return v.count(o) != 0;
 }
 
@@ -133,6 +134,8 @@ std::string crsText(const GridInfo& g) {
 
 const char* rasterTypeText(std::uint8_t t) { return t == 1 ? "PixelIsArea" : t == 2 ? "PixelIsPoint" : "?"; }
 
+const char* kindName(std::uint8_t k) { return k == kKindAboveGround ? "height above ground" : "unknown"; }
+
 struct OpenFile {
     std::unique_ptr<MappedFile> map;
     Reader reader;
@@ -192,6 +195,18 @@ int cmdInfo(const Args& a) {
             grids.push_back(o);
         }
         j.add("grids", grids);
+        std::vector<Json> layers;
+        for (std::size_t L = 0; L < r.layers(); ++L) {
+            const LayerInfo& li = fi.layers[L];
+            std::uint64_t bytes = 0;
+            for (std::size_t k = 0; k < r.layerTiles(L); ++k) bytes += r.layerEntry(L, k).totalBytes;
+            Json o;
+            o.add("layer", unsigned(L + 1)).add("kind", unsigned(li.kind)).add("kind_name", kindName(li.kind));
+            o.add("stride", unsigned(li.stride)).add("unit", li.unit).add("error_quanta", li.d).add("param", li.param);
+            o.add("tiles", std::uint64_t(r.layerTiles(L))).add("tile_bytes", bytes);
+            layers.push_back(o);
+        }
+        j.add("layers", layers).add("sections", std::uint64_t(r.sections())).add("sections_skipped", std::uint64_t(r.skippedSections()));
         if (a.has("tiles")) {
             std::vector<Json> tiles;
             for (std::size_t k = 0; k < r.tiles(); ++k) {
@@ -230,6 +245,14 @@ int cmdInfo(const Args& a) {
                     gi.spacingY, gi.width, gi.height, gi.tilesX, gi.tilesY, gi.verticalUnit.empty() ? "" : ", vertical unit ",
                     gi.verticalUnit.c_str());
     }
+    for (std::size_t L = 0; L < r.layers(); ++L) {
+        const LayerInfo& li = fi.layers[L];
+        std::uint64_t bytes = 0;
+        for (std::size_t k = 0; k < r.layerTiles(L); ++k) bytes += r.layerEntry(L, k).totalBytes;
+        std::printf("layer %zu       kind %u (%s), every %u nodes, quantum %g, epsilon %d quanta, parameter %g: %zu tiles, %llu bytes\n", L + 1,
+                    unsigned(li.kind), kindName(li.kind), li.stride, li.unit, li.d, li.param, r.layerTiles(L), (unsigned long long)bytes);
+    }
+    if (r.skippedSections()) std::printf("sections      %zu, %zu of types this reader does not know (skipped)\n", r.sections(), r.skippedSections());
     if (a.has("tiles"))
         for (std::size_t k = 0; k < r.tiles(); ++k) {
             const TileEntry e = r.entry(k);
@@ -294,6 +317,7 @@ EncodeTotals encodeToFile(const FileInfo& info, const std::vector<TileJob>& jobs
 }
 
 int cmdEncode(const Args& a) {
+    if (a.has("layer-of")) return cmdAddLayer(a);
     if (a.positional.empty() || !a.has("output")) throw std::runtime_error("usage: pyre encode <sources…> -o <out.pyre>");
     const Params p = paramsOf(a);
     const double unit = a.number("unit", 0.01);
@@ -350,9 +374,23 @@ int cmdDecode(const Args& a) {
     const Reader& r = f.reader;
     const FileInfo& fi = r.info();
     const Params& p = fi.params;
+    // --layer L (1 …): decode layer L of the file instead of the heights. Its
+    // node (i, j) is node (stride·i, stride·j); its values are in its own unit.
+    const std::uint32_t layer = a.count("layer", 0);
+    if (layer > r.layers()) throw std::runtime_error("the file has " + std::to_string(r.layers()) + " layers; no layer " + a.get("layer"));
+    const Params pl = layer ? r.layerParams(layer - 1) : p;
+    const std::uint32_t rs = layer ? fi.layers[layer - 1].stride : 1;
+    const double vunit = layer ? fi.layers[layer - 1].unit : fi.unit;
+    auto findT = [&](std::uint32_t g, std::int32_t ti, std::int32_t tj) { return layer ? r.layerFind(layer - 1, g, ti, tj) : r.find(g, ti, tj); };
+    auto entryT = [&](std::size_t k) { return layer ? r.layerEntry(layer - 1, k) : r.entry(k); };
+    auto verifyT = [&](std::size_t k) { return layer ? r.verifyLayerTile(layer - 1, k) : r.verifyTile(k); };
+    auto decodeT = [&](std::size_t k, std::uint32_t i0, std::uint32_t j0, std::uint32_t i1, std::uint32_t j1, std::uint32_t st,
+                       std::vector<std::int32_t>& out, std::vector<std::uint8_t>& mask, Scratch& s) {
+        return layer ? r.decodeLayerWindow(layer - 1, k, i0, j0, i1, j1, st, out, mask, s) : r.decodeWindow(k, i0, j0, i1, j1, st, out, mask, s);
+    };
     const std::uint32_t step = a.count("level", 1);
-    if (step == 0 || (step & (step - 1)) != 0 || step > p.base)
-        throw std::runtime_error("--level must be a power of 2 from 1 to the base step " + std::to_string(p.base));
+    if (step == 0 || (step & (step - 1)) != 0 || step > pl.base)
+        throw std::runtime_error("--level must be a power of 2 from 1 to the base step " + std::to_string(pl.base));
     const BBox box = bboxOf(a);
     const unsigned threads = threadsOf(a);
     const float noData = float(a.number("nodata", std::isnan(fi.noData) ? NAN : fi.noData));
@@ -367,7 +405,13 @@ int cmdDecode(const Args& a) {
 
     std::vector<Json> outputs;
     for (std::uint32_t gk : grids) {
-        const GridInfo& g = fi.grids[gk];
+        // A layer's grid: the same origin, every rs nodes.
+        const GridInfo& g0 = fi.grids[gk];
+        GridInfo g = g0;
+        g.spacingX *= rs;
+        g.spacingY *= rs;
+        g.width = (g0.width - 1) / rs + 1;
+        g.height = (g0.height - 1) / rs + 1;
         // The node range of the box, on the step's lattice.
         // The grid's nodes are first … first + nodes − 1 (first = the first tile · S).
         auto floorDiv = [](std::int64_t x, std::int64_t y) { return x >= 0 ? x / y : -((-x + y - 1) / y); };
@@ -381,8 +425,8 @@ int cmdDecode(const Args& a) {
             a1 = floorDiv(a1, step) * step;
         };
         std::int64_t I0, I1, J0, J1;
-        clampRange(box.minX, box.maxX, g.originX, g.spacingX, std::int64_t(g.tileI0) * p.tile, g.width, I0, I1);
-        clampRange(box.minY, box.maxY, g.originY, g.spacingY, std::int64_t(g.tileJ0) * p.tile, g.height, J0, J1);
+        clampRange(box.minX, box.maxX, g.originX, g.spacingX, std::int64_t(g.tileI0) * pl.tile, g.width, I0, I1);
+        clampRange(box.minY, box.maxY, g.originY, g.spacingY, std::int64_t(g.tileJ0) * pl.tile, g.height, J0, J1);
         if (I0 > I1 || J0 > J1) continue;
         const std::uint32_t w = std::uint32_t((I1 - I0) / step + 1), h = std::uint32_t((J1 - J0) / step + 1);
         std::vector<float> img(std::size_t(w) * h, noData);
@@ -390,24 +434,24 @@ int cmdDecode(const Args& a) {
         // The tiles that the range touches.
         std::vector<std::size_t> tiles;
         const std::int64_t lastI = std::int64_t(g.tileI0) + g.tilesX - 1, lastJ = std::int64_t(g.tileJ0) + g.tilesY - 1;
-        for (std::int64_t tj = floorDiv(J0, p.tile); tj <= std::min<std::int64_t>(floorDiv(J1, p.tile), lastJ); ++tj)
-            for (std::int64_t ti = floorDiv(I0, p.tile); ti <= std::min<std::int64_t>(floorDiv(I1, p.tile), lastI); ++ti)
-                if (auto k = r.find(gk, std::int32_t(ti), std::int32_t(tj))) tiles.push_back(*k);
+        for (std::int64_t tj = floorDiv(J0, pl.tile); tj <= std::min<std::int64_t>(floorDiv(J1, pl.tile), lastJ); ++tj)
+            for (std::int64_t ti = floorDiv(I0, pl.tile); ti <= std::min<std::int64_t>(floorDiv(I1, pl.tile), lastI); ++ti)
+                if (auto k = findT(gk, std::int32_t(ti), std::int32_t(tj))) tiles.push_back(*k);
         std::atomic<std::uint64_t> badTiles{0};
         parallelFor(tiles.size(), threads, [&](std::size_t n) {
             const std::size_t k = tiles[n];
-            const TileEntry e = r.entry(k);
-            if (!r.verifyTile(k)) {
+            const TileEntry e = entryT(k);
+            if (!verifyT(k)) {
                 ++badTiles;
                 return;
             }
-            const std::int64_t tI = std::int64_t(e.ti) * p.tile, tJ = std::int64_t(e.tj) * p.tile;
-            const std::uint32_t i0 = std::uint32_t(std::max<std::int64_t>(I0 - tI, 0)), i1 = std::uint32_t(std::min<std::int64_t>(I1 - tI, p.tile));
-            const std::uint32_t j0 = std::uint32_t(std::max<std::int64_t>(J0 - tJ, 0)), j1 = std::uint32_t(std::min<std::int64_t>(J1 - tJ, p.tile));
-            std::vector<std::int32_t> out(p.nodes());
-            std::vector<std::uint8_t> mask((e.flags & kTileHoles) ? p.nodes() : 0);
+            const std::int64_t tI = std::int64_t(e.ti) * pl.tile, tJ = std::int64_t(e.tj) * pl.tile;
+            const std::uint32_t i0 = std::uint32_t(std::max<std::int64_t>(I0 - tI, 0)), i1 = std::uint32_t(std::min<std::int64_t>(I1 - tI, pl.tile));
+            const std::uint32_t j0 = std::uint32_t(std::max<std::int64_t>(J0 - tJ, 0)), j1 = std::uint32_t(std::min<std::int64_t>(J1 - tJ, pl.tile));
+            std::vector<std::int32_t> out(pl.nodes());
+            std::vector<std::uint8_t> mask((e.flags & kTileHoles) ? pl.nodes() : 0);
             Scratch s;
-            need(r.decodeWindow(k, i0, j0, i1, j1, step, out, mask, s), "cannot decode a tile");
+            need(decodeT(k, i0, j0, i1, j1, step, out, mask, s), "cannot decode a tile");
             for (std::uint32_t j = j0; j <= j1; ++j) {
                 const std::int64_t J = tJ + j;
                 if ((J - J0) % step) continue;
@@ -415,9 +459,9 @@ int cmdDecode(const Args& a) {
                 for (std::uint32_t i = i0; i <= i1; ++i) {
                     const std::int64_t I = tI + i;
                     if ((I - I0) % step) continue;
-                    const std::size_t t = std::size_t(j) * p.side() + i;
+                    const std::size_t t = std::size_t(j) * pl.side() + i;
                     if (!mask.empty() && !mask[t]) continue;
-                    img[row * w + std::size_t((I - I0) / step)] = float(double(out[t]) * fi.unit);
+                    img[row * w + std::size_t((I - I0) / step)] = float(double(out[t]) * vunit);
                 }
             }
         });
@@ -437,8 +481,8 @@ int cmdDecode(const Args& a) {
         geo.originX = g.originX + double(I0) * g.spacingX;
         geo.originY = g.originY + double(J1) * g.spacingY;
         if (geo.rasterType == RasterType::PixelIsArea) {
-            geo.originX += g.spacingX / 2 - geo.spacingX / 2;
-            geo.originY += -g.spacingY / 2 + geo.spacingY / 2;
+            geo.originX += g0.spacingX / 2 - geo.spacingX / 2;
+            geo.originY += -g0.spacingY / 2 + geo.spacingY / 2;
         }
         std::string path = a.get("output");
         if (grids.size() > 1) {
@@ -451,7 +495,7 @@ int cmdDecode(const Args& a) {
         }
         writeGeoTiff(path, w, h, img.data(), geo, std::isnan(noData) ? std::optional<double>() : std::optional<double>(noData));
         Json o;
-        o.add("output", path).add("grid", unsigned(gk)).add("width", unsigned(w)).add("height", unsigned(h)).add("tiles", std::uint64_t(tiles.size()));
+        o.add("output", path).add("grid", unsigned(gk)).add("layer", unsigned(layer)).add("width", unsigned(w)).add("height", unsigned(h)).add("tiles", std::uint64_t(tiles.size()));
         outputs.push_back(o);
         if (!a.has("json"))
             std::printf("wrote %s: %u × %u at step %u from %zu tiles of grid %u\n", path.c_str(), w, h, step, tiles.size(), gk);
@@ -468,6 +512,7 @@ int cmdDecode(const Args& a) {
 // ── verify ───────────────────────────────────────────────────────────────────
 
 int cmdVerify(const Args& a) {
+    if (a.has("layer")) return verifyLayer(a);
     if (a.positional.size() < 2) throw std::runtime_error("usage: pyre verify <file.pyre> <sources…>");
     OpenFile f(a.positional[0]);
     const Reader& r = f.reader;

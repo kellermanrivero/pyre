@@ -56,6 +56,10 @@ int cmdDecode(const Args& a);
 int cmdVerify(const Args& a);
 int cmdBench(const Args& a);
 int cmdCompare(const Args& a);
+/// pyre encode … --layer-of <file.pyre>: adds a layer to a file (layer.cpp).
+int cmdAddLayer(const Args& a);
+/// pyre verify <file.pyre> --layer L <sources…> (layer.cpp).
+int verifyLayer(const Args& a);
 
 // ── Encoding many tiles into one file ─────────────────────────────────────────
 

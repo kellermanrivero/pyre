@@ -1,9 +1,11 @@
 // Tests of the file: the checksum, write and read, the index, windows,
 // damage, and the golden files (bit-exact on every platform).
 
+#include <array>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <map>
 
 #include "check.hpp"
 #include "pyre/pyre.hpp"
@@ -251,6 +253,205 @@ TEST(file_empty_index) {
     Reader r;
     CHECK(r.open(sink.bytes) == Status::Ok);
     CHECK(r.tiles() == 0);
+}
+
+// ── Layers (sections) ────────────────────────────────────────────────────────
+
+struct Layered {
+    std::vector<std::uint8_t> file;
+    // Layer L's decoded tile at each place: (grid, ti, tj) → values.
+    std::vector<std::map<std::array<int, 3>, std::vector<std::int32_t>>> recon;
+};
+
+/// Grid 0 with 2 × 2 tiles; layer 0 (stride 2) at every tile and at one place
+/// with no main tile; layer 1 (stride 1, kind 7) at one tile only.
+Layered buildLayered(const Params& p) {
+    FileInfo info;
+    info.params = p;
+    info.d = 20;
+    info.unit = 0.01;
+    GridInfo g;
+    g.width = 2 * p.tile + 1;
+    g.height = 3 * p.tile + 1;
+    g.tilesX = 2;
+    g.tilesY = 3;
+    info.grids = {g};
+    LayerInfo l0;
+    l0.kind = kKindAboveGround;
+    l0.stride = 2;
+    l0.unit = 3;
+    l0.d = 0;
+    l0.param = 3;
+    LayerInfo l1 = l0;
+    l1.kind = 7;
+    l1.stride = 1;
+    l1.unit = 0.5;
+    l1.d = 1;
+    l1.param = 0;
+    info.layers = {l0, l1};
+    VectorSink sink;
+    Builder b;
+    REQUIRE(b.begin(info, sink) == Status::Ok);
+    Layered out;
+    out.recon.resize(2);
+    auto addLayer = [&](std::size_t L, int ti, int tj, std::uint64_t seed) {
+        const Params lp = layerParams(p, info.layers[L].stride);
+        std::vector<std::int32_t> x(lp.nodes());
+        synth::Rng rng(seed);
+        // Blocky values: mostly 0, some patches of the same value.
+        for (std::size_t q = 0; q < x.size(); ++q) x[q] = (q / 7 + seed) % 5 == 0 ? std::int32_t(rng.range(1, 9)) : 0;
+        EncodedTile t;
+        std::vector<std::int32_t> recon(lp.nodes());
+        REQUIRE(encodeTile(lp, Method::v1(), info.layers[L].d, x, {}, t, recon) == Status::Ok);
+        REQUIRE(b.addLayer(L, 0, ti, tj, t, info.layers[L].d) == Status::Ok);
+        out.recon[L][{0, ti, tj}] = recon;
+    };
+    for (int tj = 0; tj < 2; ++tj)
+        for (int ti = 0; ti < 2; ++ti) {
+            EncodedTile t;
+            REQUIRE(encodeTile(p, Method::v1(), 20, integerTerrain(p, 5, ti, tj), {}, t) == Status::Ok);
+            REQUIRE(b.add(0, ti, tj, t, 20) == Status::Ok);
+            addLayer(0, ti, tj, std::uint64_t(10 + ti + 2 * tj));
+            if (ti == 1 && tj == 1) addLayer(1, ti, tj, 99);
+        }
+    addLayer(0, 1, 2, 77);   // a layer tile with no main tile
+    REQUIRE(b.finish() == Status::Ok);
+    out.file = std::move(sink.bytes);
+    return out;
+}
+
+/// Writes the header's checksum again (after a test changed the header).
+void resealHeader(std::vector<std::uint8_t>& f) {
+    const std::uint32_t hb = detail::get<std::uint32_t>(f.data() + 8);
+    detail::set(f.data() + 12, std::uint32_t(0));
+    detail::set(f.data() + 12, crc32c(f.data(), hb));
+}
+
+TEST(file_layers_roundtrip) {
+    for (const Params& p : {Params{40, 20, 8, 1}, Params{64, 16, 16, 2}}) {
+        const Layered f = buildLayered(p);
+        Reader r;
+        REQUIRE(r.open(f.file) == Status::Ok);
+        CHECK(r.tiles() == 4);
+        REQUIRE(r.layers() == 2);
+        CHECK(r.sections() == 2 && r.skippedSections() == 0);
+        CHECK(r.info().layers[0].kind == kKindAboveGround && r.info().layers[0].stride == 2 && r.info().layers[0].unit == 3);
+        CHECK(r.info().layers[0].param == 3 && r.info().layers[1].kind == 7 && r.info().layers[1].d == 1);
+        CHECK(r.layerTiles(0) == 5 && r.layerTiles(1) == 1);
+        CHECK(r.layerParams(0) == layerParams(p, 2));
+        Scratch s;
+        for (std::size_t L = 0; L < 2; ++L)
+            for (const auto& [place, want] : f.recon[L]) {
+                const auto k = r.layerFind(L, std::uint32_t(place[0]), place[1], place[2]);
+                REQUIRE(k.has_value());
+                CHECK(r.verifyLayerTile(L, *k));
+                const Params lp = r.layerParams(L);
+                std::vector<std::int32_t> out(lp.nodes());
+                std::vector<std::uint8_t> none;
+                REQUIRE(r.decodeLayerWindow(L, *k, 0, 0, lp.tile, lp.tile, 1, out, none, s) == Status::Ok);
+                CHECK(out == want);
+                // One block alone, after the head: it equals the same block of the whole.
+                std::vector<std::int32_t> one(lp.nodes(), INT32_MIN);
+                REQUIRE(r.decodeLayerHead(L, *k, one, none, 1, s) == Status::Ok);
+                REQUIRE(r.decodeLayerBlock(L, *k, 1, 0, one, none, 1, s) == Status::Ok);
+                const std::uint32_t B = lp.block;
+                for (std::uint32_t j = 1; j < B; ++j)
+                    for (std::uint32_t i = B + 1; i < 2 * B; ++i) CHECK(one[j * lp.side() + i] == want[j * lp.side() + i]);
+            }
+        CHECK(!r.layerFind(1, 0, 0, 0).has_value());
+        CHECK(!r.find(0, 1, 2).has_value());
+        // The main heights read as in a file with no layers.
+        CHECK(r.verifyTile(0));
+    }
+}
+
+TEST(file_without_layers_has_no_sections) {
+    const Built b = buildFile(Params{40, 20, 8, 1}, Method::v1(), 99, false);
+    CHECK(detail::get<std::uint32_t>(b.file.data() + 92) == 0);
+    CHECK(detail::get<std::uint64_t>(b.file.data() + 104) == 0);
+    CHECK(detail::get<std::uint32_t>(b.file.data() + 112) == 0);
+    Reader r;
+    REQUIRE(r.open(b.file) == Status::Ok);
+    CHECK(r.layers() == 0 && r.sections() == 0);
+}
+
+TEST(file_sections_unknown_and_required) {
+    const Layered f = buildLayered(Params{40, 20, 8, 1});
+    const std::uint64_t table = detail::get<std::uint64_t>(f.file.data() + 104);
+    auto withType = [&](std::uint32_t type, std::uint32_t flags) {
+        std::vector<std::uint8_t> v = f.file;
+        detail::set(v.data() + table + kSectionBytes, type);   // the second section
+        detail::set(v.data() + table + kSectionBytes + 4, flags);
+        detail::set(v.data() + 112, crc32c(v.data() + table, 2 * kSectionBytes));
+        resealHeader(v);
+        return v;
+    };
+    Reader r;
+    // A type this reader does not know: skipped.
+    const auto skip = withType(99, 0);
+    REQUIRE(r.open(skip) == Status::Ok);
+    CHECK(r.sections() == 2 && r.skippedSections() == 1 && r.layers() == 1);
+    // The same, marked required: refused, with the reason.
+    const auto req = withType(99, kSectionRequired);
+    CHECK(r.open(req) == Status::Version);
+    CHECK(r.error().find("section type 99") != std::string::npos);
+    // A changed byte in a section, or in the table: refused.
+    std::vector<std::uint8_t> bad = f.file;
+    bad[detail::get<std::uint64_t>(f.file.data() + table + 8) + 70] ^= 1;
+    CHECK(r.open(bad) == Status::Corrupt);
+    bad = f.file;
+    bad[table + 3] ^= 1;
+    CHECK(r.open(bad) == Status::Corrupt);
+    // Random damage anywhere: an error or a good file, never a crash.
+    synth::Rng rng(5);
+    for (int trial = 0; trial < 2000; ++trial) {
+        bad = f.file;
+        for (int k = 0; k < 1 + trial % 4; ++k) bad[std::size_t(rng.range(0, int(bad.size()) - 1))] ^= std::uint8_t(1 + rng.range(0, 254));
+        const Status st = r.open(bad);
+        CHECK(st == Status::Ok || st == Status::Corrupt || st == Status::Version);
+        if (st != Status::Ok) continue;
+        Scratch s;
+        for (std::size_t L = 0; L < r.layers(); ++L)
+            for (std::size_t k = 0; k < r.layerTiles(L); ++k) {
+                const Params lp = r.layerParams(L);
+                std::vector<std::int32_t> out(lp.nodes());
+                std::vector<std::uint8_t> mask(lp.nodes());
+                const Status d = r.decodeLayerWindow(L, k, 0, 0, lp.tile, lp.tile, 1, out, mask, s);
+                CHECK(d == Status::Ok || d == Status::Corrupt);
+            }
+    }
+}
+
+TEST(file_layer_rules) {
+    const Params p{40, 20, 8, 1};
+    FileInfo info;
+    info.params = p;
+    info.grids.resize(1);
+    LayerInfo l;
+    VectorSink sink;
+    Builder b;
+    for (std::uint32_t bad : {0u, 3u, 8u, 16u}) {   // not a power of 2, or no base step left
+        l.stride = bad;
+        info.layers = {l};
+        CHECK(b.begin(info, sink) == Status::BadParams);
+    }
+    l.stride = 2;
+    l.kind = kKindHeights;   // kind 0 is the main heights, never a layer
+    info.layers = {l};
+    CHECK(b.begin(info, sink) == Status::BadParams);
+    l.kind = kKindAboveGround;
+    info.layers = {l};
+    REQUIRE(b.begin(info, sink) == Status::Ok);
+    std::vector<std::int32_t> x(layerParams(p, 2).nodes(), 1);
+    EncodedTile t;
+    REQUIRE(encodeTile(layerParams(p, 2), Method::v1(), 0, x, {}, t) == Status::Ok);
+    CHECK(b.addLayer(1, 0, 0, 0, t, 0) == Status::Usage);   // no layer 1
+    EncodedTile wrong;
+    REQUIRE(encodeTile(p, Method::v1(), 0, std::vector<std::int32_t>(p.nodes(), 1), {}, wrong) == Status::Ok);
+    CHECK(b.addLayer(0, 0, 0, 0, wrong, 0) == Status::Usage || wrong.blocks.size() == t.blocks.size());
+    CHECK(b.addLayer(0, 0, 0, 0, t, 0) == Status::Ok);
+    CHECK(b.addLayer(0, 0, 0, 0, t, 0) == Status::Ok);
+    CHECK(b.finish() == Status::BadInput);   // two layer tiles at one place
 }
 
 // ── Golden files ─────────────────────────────────────────────────────────────

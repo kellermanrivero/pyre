@@ -49,6 +49,7 @@ struct PyreSource::Impl {
     std::int64_t firstI = 0, firstJ = 0;   // the grid's first node
 
     std::size_t cacheLimit = kDefaultCacheTiles;
+    bool predictedHoles = false;
     mutable std::mutex mutex;
     mutable std::map<std::size_t, std::pair<std::shared_ptr<const Decoded>, std::uint64_t>> cache;
     mutable std::uint64_t clock = 0;
@@ -88,7 +89,7 @@ struct PyreSource::Impl {
     }
 };
 
-std::unique_ptr<PyreSource> PyreSource::open(const std::string& path, std::size_t cacheTiles) {
+std::unique_ptr<PyreSource> PyreSource::open(const std::string& path, std::size_t cacheTiles, bool predictedHoles) {
     auto m = std::make_unique<Impl>();
     bool given = false;
     const std::string file = splitPath(path, m->grid, given);
@@ -103,6 +104,7 @@ std::unique_ptr<PyreSource> PyreSource::open(const std::string& path, std::size_
     m->p = fi.params;
     m->unit = fi.unit;
     m->cacheLimit = cacheTiles;
+    m->predictedHoles = predictedHoles;
     const GridInfo& g = m->g;
     if (g.width < 1 || g.height < 1) throw SourceError(path + ": the grid is empty");
     m->firstI = std::int64_t(g.tileI0) * m->p.tile;
@@ -158,7 +160,7 @@ void PyreSource::readWindow(std::uint32_t col0, std::uint32_t row0, std::uint32_
         const std::int64_t i = I - ti * S, j = J - tj * S;
         if (i < 0 || j < 0 || i > S || j > S) return false;
         const std::size_t t = std::size_t(j * side + i);
-        if (!d->mask.empty() && !d->mask[t]) return false;
+        if (!m.predictedHoles && !d->mask.empty() && !d->mask[t]) return false;
         // As a float32 raster holds it: for a float32 source with whole quanta
         // (the MDT02 has whole mm) this is the source's value, bit for bit.
         v = double(float(double(d->heights[t]) * m.unit));

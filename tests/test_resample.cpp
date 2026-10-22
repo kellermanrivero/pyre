@@ -42,7 +42,7 @@ struct TempDir {
     }
     ~TempDir() {
         std::error_code ec;
-        for (const char* f : {"a.tif", "b.tif", "c.tif", "pack.alt", "out.pyre", "a.pyre", "two.pyre", "ov.tif"}) fs::remove(path / f, ec);
+        for (const char* f : {"a.tif", "b.tif", "c.tif", "pack.alt", "out.pyre", "a.pyre", "two.pyre", "ov.tif", "l.pyre", "l.tif"}) fs::remove(path / f, ec);
         fs::remove(path, ec);
     }
     std::string file(const char* name) const { return (path / name).string(); }
@@ -578,6 +578,124 @@ TEST(overlay_must_be_on_the_grid) {
     CHECK(refused([&] { writeOverlay(dir.file("ov.tif"), g, 20, 40, 2, 2, v, RasterType::PixelIsPoint, 2, "", 25830u); }));   // EPSG
     CHECK(refused([&] { writeOverlay(dir.file("ov.tif"), g, 20, 40, 2, 2, v, RasterType::PixelIsPoint, 2, LocalGrid(41, -3.7).wkt()); }));
     CHECK(!refused([&] { writeOverlay(dir.file("ov.tif"), g, 20, 40, 2, 2, v); }));
+}
+
+// ── The second pass: a layer of heights above the ground ─────────────────────
+
+/// Runs a command with its standard output silenced; returns its result.
+int quietly(int (*cmd)(const Args&), const Args& a) {
+    std::fflush(stdout);
+    const int saved = ::dup(1);
+    std::FILE* null = std::fopen("/dev/null", "w");
+    ::dup2(::fileno(null), 1);
+    int r = -1;
+    try {
+        r = cmd(a);
+    } catch (...) {
+        std::fflush(stdout);
+        ::dup2(saved, 1);
+        ::close(saved);
+        std::fclose(null);
+        throw;
+    }
+    std::fflush(stdout);
+    ::dup2(saved, 1);
+    ::close(saved);
+    std::fclose(null);
+    return r;
+}
+
+TEST(layer_above_ground_two_passes) {
+    TempDir dir("layer");
+    // The ground: a slope, with a hole (no data) inside the building.
+    auto ground = [](double lon, double lat) { return 500 + 800 * lon - 300 * lat; };
+    auto inBuilding = [](double lon, double lat) { return lon > 0.010 && lon < 0.022 && lat > 0.170 && lat < 0.182; };
+    auto inHole = [](double lon, double lat) { return lon > 0.014 && lon < 0.017 && lat > 0.175 && lat < 0.178; };
+    auto inCar = [](double lon, double lat) { return lon > 0.030 && lon < 0.036 && lat > 0.170 && lat < 0.182; };
+    writeSheet(dir.file("a.tif"), 0.0, 0.2, 60, 50, [&](double lon, double lat) { return inHole(lon, lat) ? -32767.0 : ground(lon, lat); });
+    // The surface, on another lattice (0.3 pixel off): the ground, +10 m on the building, +2 m on the car.
+    writeSheet(dir.file("b.tif"), -0.0003, 0.2003, 62, 52, [&](double lon, double lat) {
+        return ground(lon, lat) + (inBuilding(lon, lat) ? 10.0 : inCar(lon, lat) ? 2.0 : 0.0);
+    });
+    encodeQuiet({dir.file("a.tif")}, dir.file("a.pyre"), "0");
+
+    Args add;
+    add.positional = {dir.file("b.tif")};
+    add.options = {{"layer-of", dir.file("a.pyre")}, {"kind", "1"}, {"output", dir.file("l.pyre")}, {"threads", "2"}};
+    REQUIRE(quietly(cmdAddLayer, add) == 0);
+
+    MappedFile map(dir.file("l.pyre"));
+    Reader r;
+    REQUIRE(r.open(map.bytes()) == Status::Ok);
+    REQUIRE(r.layers() == 1);
+    const LayerInfo& l = r.info().layers[0];
+    CHECK(l.kind == kKindAboveGround && l.stride == 2 && l.unit == 3 && l.param == 3 && l.d == 0);
+    // The heights are copied as they were.
+    MappedFile before(dir.file("a.pyre"));
+    Reader r0;
+    REQUIRE(r0.open(before.bytes()) == Status::Ok);
+    REQUIRE(r.tiles() == r0.tiles());
+    for (std::size_t k = 0; k < r.tiles(); ++k) {
+        const auto x = r.tileBytes(k), y = r0.tileBytes(k);
+        CHECK(std::equal(x.begin(), x.end(), y.begin(), y.end()));
+    }
+
+    // Decode the layer as a raster and look at places.
+    Args dec;
+    dec.positional = {dir.file("l.pyre")};
+    dec.options = {{"output", dir.file("l.tif")}, {"layer", "1"}};
+    REQUIRE(quietly(cmdDecode, dec) == 0);
+    const auto t = openSource(dir.file("l.tif"));
+    const SourceInfo& ti = t->info();
+    CHECK(ti.width == 30 && ti.height == 25);   // every 2 pixels of 60 × 50: 59/2 + 1, 49/2 + 1
+    std::vector<double> v(std::size_t(ti.width) * ti.height);
+    t->readWindow(0, 0, ti.width, ti.height, v.data());
+    auto at = [&](double lon, double lat) {
+        // The pixel whose centre is nearest, by the raster's own georeference (PixelIsArea, as the sheet).
+        const Georef& gr = ti.georef;
+        const long c = std::lround((lon - gr.originX) / gr.spacingX - 0.5), row = std::lround((gr.originY - lat) / gr.spacingY - 0.5);
+        if (c < 0 || row < 0 || c >= long(ti.width) || row >= long(ti.height)) return -1.0;   // outside: a test error
+        return v[std::size_t(row) * ti.width + std::size_t(c)];
+    };
+    CHECK(at(0.016, 0.173) == 9);    // the building: 10 m → 3 steps of 3 m
+    CHECK(at(0.0155, 0.1765) == 9);  // the building over the hole: the ground there is the prediction
+    CHECK(at(0.033, 0.176) == 0);    // the car: under 3 m
+    CHECK(at(0.050, 0.160) == 0);    // the ground
+
+    // verify --layer recomputes it from the sources.
+    Args ver;
+    ver.positional = {dir.file("l.pyre"), dir.file("b.tif")};
+    ver.options = {{"layer", "1"}};
+    CHECK(quietly(cmdVerify, ver) == 0);
+
+    // A second layer of the same kind is refused; so is a kind this tool does not make.
+    add.options["layer-of"] = dir.file("l.pyre");
+    bool threw = false;
+    try {
+        quietly(cmdAddLayer, add);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+    add.options["layer-of"] = dir.file("a.pyre");
+    add.options["kind"] = "2";
+    threw = false;
+    try {
+        quietly(cmdAddLayer, add);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // Without -o the file itself gets the layer.
+    add.options["kind"] = "1";
+    add.options.erase("output");
+    REQUIRE(quietly(cmdAddLayer, add) == 0);
+    MappedFile inPlace(dir.file("a.pyre"));
+    Reader r2;
+    REQUIRE(r2.open(inPlace.bytes()) == Status::Ok);
+    CHECK(r2.layers() == 1);
+    CHECK(std::equal(map.bytes().begin(), map.bytes().end(), inPlace.bytes().begin(), inPlace.bytes().end()));
 }
 
 }  // namespace

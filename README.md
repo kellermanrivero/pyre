@@ -62,6 +62,7 @@ pyre decode <file.pyre> -o <out.tif> [--bbox …] [--level STEP] [--grid K] [--n
 pyre verify <file.pyre> <sources…>
 pyre bench  <sources…> [the encode options] [--reference] [--max-tiles N]
 pyre compare <file.pyre> <pack.alt>
+pyre encode <surface rasters…> --layer-of <file.pyre> --kind 1 [--unit 3] [--min 3] [--stride 2] [-o <out.pyre>]
 ```
 
 Each command takes `--json` and then prints one JSON object.
@@ -83,6 +84,53 @@ pyre encode MDT02-WGS84-0559-2-COB2.tif -o madrid-ne.pyre --epsilon 0.99
 pyre verify madrid-ne.pyre MDT02-WGS84-0559-2-COB2.tif
 pyre decode madrid-ne.pyre -o madrid-ne-16.tif --level 8
 ```
+
+## Layers: the height of objects above the ground
+
+A file can carry layers: more integer grids on its tiles, each with its own stride,
+quantum and error limit, coded as the heights are. A reader that needs only the
+heights never reads them (`docs/FORMAT.md`, section 9). The kind (a u8) says what a
+layer is; kind 1 is the height of objects (buildings, trees) above the ground.
+
+A layer is added in a second pass, to a file that has its heights already:
+
+```sh
+pyre encode MDT02-WGS84-0559-2-COB2.tif -o 0559-2.pyre --epsilon 0.09        # pass 1: the heights
+pyre encode <MDS02 folder> --layer-of 0559-2.pyre --kind 1                   # pass 2: the layer
+pyre verify 0559-2.pyre --layer 1 <MDS02 folder>
+pyre decode 0559-2.pyre --layer 1 -o 0559-2-objects.tif
+scripts/add-layer.sh data/mdt02-e0.09 <MDS02 folder>                          # pass 2 on a folder
+```
+
+- **The ground is the file's own heights.** No terrain raster is needed in the second
+  pass, and the surface sheets need not match the terrain sheets: any surface rasters
+  in degrees are sampled at the file's nodes (the rule of `pyre-resample`). Under a
+  hole of the heights (for example under a large roof) the ground is the decoder's
+  prediction there, so the building still gets a height.
+- **The values.** h = surface − ground. Each layer node takes the largest h of the
+  `--stride` × `--stride` nodes round it (2: every 4 m on the MDT02). Under `--min`
+  (3 m) the value is 0; else it is the nearest whole count of `--unit` (3 m), at least 1:
+  3, 6, 9 … m, within 1.5 m. `--epsilon` (0) is the error limit in metres.
+- **Without `-o`** the file is replaced through a new file and a rename. Its heights
+  (and the layers it has) are copied byte for byte; the new layer's tiles go next to
+  them.
+
+The 8 test sheets, from the 9 cm archive, with the MDS02 (default options):
+
+| Sheet | Heights (bytes) | Layer (bytes) | Added | Objects ≥ 3 m |
+|---|---:|---:|---:|---:|
+| 0559-2 city | 5,154,952 | 1,449,294 | 28.1 % | 38.7 % of the layer nodes |
+| 0762-1 flat | 782,840 | 248,238 | 31.7 % | 5.2 % |
+| 0737-2 flat | 5,844,248 | 1,308,807 | 22.4 % | 31.2 % |
+| 0056-1 mountains | 16,619,176 | 1,933,783 | 11.6 % | 44.6 % |
+| 0180-2 high mountains | 17,386,056 | 1,155,310 | 6.6 % | 25.3 % |
+| 0014-1 coast | 3,022,296 | 468,828 | 15.5 % | 11.5 % |
+| 0722-2 coast | 523,320 | 282,135 | 53.9 % | 7.2 % |
+| 0146-1 border | 5,540,836 | 143,693 | 2.6 % | 9.7 % |
+| all | 54,873,724 | 6,990,088 | 12.7 % | 22.8 % |
+
+`verify --layer` checked every layer node against the MDS02 again: no error. The
+surface model has trees as well as buildings, so kind 1 has both.
 
 ## Resampling onto a local metre grid: `pyre-resample`
 
