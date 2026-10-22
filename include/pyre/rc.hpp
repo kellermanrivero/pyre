@@ -4,7 +4,7 @@
 //  rc.hpp — LZMA's binary range coder, with 15-bit probabilities
 // ═════════════════════════════════════════════════════════════════════════════
 //
-// The reference (mundosm heightmap.hpp) uses this coder as it is. LZMA uses
+// The reference (heightmap.hpp, format 3) uses this coder as it is. LZMA uses
 // 11-bit probabilities: with a shift of 5, the probability of an event does not
 // go below 31/2048, and a sure "zero" costs at least 0.022 bits. A tile of sea
 // is a million zeros, so that floor is 2.7 KB a tile. With 15 bits the floor is

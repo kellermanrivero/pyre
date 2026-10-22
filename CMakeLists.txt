@@ -14,8 +14,8 @@ endif()
 option(PYRE_BUILD_TOOL "Build the pyre command-line tool" ON)
 option(PYRE_BUILD_TESTS "Build the tests" ON)
 option(PYRE_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-set(PYRE_REFERENCE_DIR "/Users/kellermanrivero/Development/mundosm/src/core"
-    CACHE PATH "Folder of the reference heightmap.hpp (read only), for the comparison test and tool")
+set(PYRE_REFERENCE_DIR "" CACHE PATH "Folder of the reference heightmap.hpp (read only), for the comparison test and tool")
+set(PYRE_REFERENCE_NAMESPACE "" CACHE STRING "The C++ namespace of the reference heightmap.hpp")
 
 add_library(pyre INTERFACE)
 target_include_directories(pyre INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -28,15 +28,16 @@ if(PYRE_SANITIZE)
 endif()
 
 set(PYRE_HAVE_REFERENCE OFF)
-if(EXISTS "${PYRE_REFERENCE_DIR}/heightmap.hpp")
+if(PYRE_REFERENCE_NAMESPACE AND EXISTS "${PYRE_REFERENCE_DIR}/heightmap.hpp")
   set(PYRE_HAVE_REFERENCE ON)
 endif()
 
 if(PYRE_BUILD_TOOL)
   find_package(ZLIB REQUIRED)
   # The tool's parts, shared by the tool and the tests.
-  add_library(pyretool STATIC tools/pyre/grid.cpp tools/pyre/commands.cpp tools/pyre/tiff.cpp
-              tools/pyre/tiff_codec.cpp tools/pyre/tiff_write.cpp)
+  add_library(pyretool STATIC tools/pyre/grid.cpp tools/pyre/commands.cpp tools/pyre/compare.cpp tools/pyre/tiff.cpp
+              tools/pyre/tiff_codec.cpp tools/pyre/tiff_write.cpp tools/pyre/resample.cpp tools/pyre/alt.cpp
+              tools/pyre/tile_epsilon.cpp tools/pyre/source.cpp tools/pyre/pyre_source.cpp tools/pyre/overlay.cpp)
   target_include_directories(pyretool PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/pyre)
   target_link_libraries(pyretool PUBLIC pyre ZLIB::ZLIB)
   target_compile_options(pyretool PRIVATE ${PYRE_WARNINGS})
@@ -49,9 +50,14 @@ if(PYRE_BUILD_TOOL)
   target_compile_options(pyre-tool PRIVATE ${PYRE_WARNINGS})
   if(PYRE_HAVE_REFERENCE)
     # bench --reference: the reference codec on the same windows (read only).
-    target_compile_definitions(pyre-tool PRIVATE PYRE_HAVE_REFERENCE=1)
+    target_compile_definitions(pyre-tool PRIVATE PYRE_HAVE_REFERENCE=1 PYRE_REFERENCE_NS=${PYRE_REFERENCE_NAMESPACE})
     target_include_directories(pyre-tool SYSTEM PRIVATE ${PYRE_REFERENCE_DIR})
   endif()
+
+  # pyre-resample: geographic sources onto a local metre grid round a centre point.
+  add_executable(pyre-resample tools/pyre-resample/main.cpp)
+  target_link_libraries(pyre-resample PRIVATE pyretool)
+  target_compile_options(pyre-resample PRIVATE ${PYRE_WARNINGS})
 endif()
 
 if(PYRE_BUILD_TESTS)
@@ -73,14 +79,21 @@ if(PYRE_BUILD_TESTS)
     target_include_directories(test_tiff PRIVATE tests)
     target_compile_options(test_tiff PRIVATE ${PYRE_WARNINGS})
     add_test(NAME tiff COMMAND test_tiff)
+
+    add_executable(test_resample tests/test_resample.cpp)
+    target_link_libraries(test_resample PRIVATE pyretool)
+    target_include_directories(test_resample PRIVATE tests)
+    target_compile_options(test_resample PRIVATE ${PYRE_WARNINGS})
+    add_test(NAME resample COMMAND test_resample)
   endif()
 
   if(PYRE_HAVE_REFERENCE)
     add_executable(test_reference tests/test_reference.cpp)
     target_link_libraries(test_reference PRIVATE pyre)
     target_include_directories(test_reference SYSTEM PRIVATE ${PYRE_REFERENCE_DIR})
+    target_compile_definitions(test_reference PRIVATE PYRE_REFERENCE_NS=${PYRE_REFERENCE_NAMESPACE})
     add_test(NAME reference COMMAND test_reference)
   else()
-    message(STATUS "pyre: no reference header in ${PYRE_REFERENCE_DIR}; test_reference is not built")
+    message(STATUS "pyre: no reference (set PYRE_REFERENCE_DIR and PYRE_REFERENCE_NAMESPACE); test_reference is not built")
   endif()
 endif()

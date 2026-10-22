@@ -1,6 +1,6 @@
 // pyre bench: encode and decode sources in memory; size, speed, error.
 //
-// With PYRE_HAVE_REFERENCE (the build finds mundosm's heightmap.hpp, read
+// With PYRE_HAVE_REFERENCE (the build finds the reference heightmap.hpp, read
 // only), --reference also encodes and decodes the same 1001 × 1001 windows
 // with the reference: the tiles with no holes (the reference has no no-data).
 
@@ -216,7 +216,7 @@ Result benchSource(const Source& src, const Params& p, double unit, std::int32_t
 
 #ifdef PYRE_HAVE_REFERENCE
     if (reference) {
-        namespace ref = mundosm::heightmap;
+        namespace ref = PYRE_REFERENCE_NS;
         if (p != Params{} ) throw std::runtime_error("--reference needs the reference's parameters (tile 1000, block 200, base 8, block levels 1)");
         std::vector<std::int32_t> out(p.nodes());
         std::vector<std::uint8_t> none;
@@ -253,7 +253,7 @@ Result benchSource(const Source& src, const Params& p, double unit, std::int32_t
         }
     }
 #else
-    if (reference) throw std::runtime_error("this build has no reference (mundosm heightmap.hpp was not found)");
+    if (reference) throw std::runtime_error("this build has no reference (see PYRE_REFERENCE_DIR in README.md)");
 #endif
     return r;
 }

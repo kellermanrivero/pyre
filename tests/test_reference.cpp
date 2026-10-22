@@ -1,16 +1,17 @@
 // pyre with Method::reference() must write, for a tile with no holes, the
-// same streams as the reference (mundosm's heightmap.hpp, format 3), byte for
+// same streams as the reference (its heightmap.hpp, format 3), byte for
 // byte, and reconstruct the same heights. This pins the port to the original.
-// It builds only when the reference header is found (PYRE_REFERENCE_DIR).
+// It builds only when the reference header is found (PYRE_REFERENCE_DIR and
+// PYRE_REFERENCE_NAMESPACE).
 
 #include <cstring>
 
 #include "check.hpp"
-#include "heightmap.hpp"   // mundosm::heightmap, read only
+#include "heightmap.hpp"   // the reference, read only
 #include "pyre/tile.hpp"
 #include "synth.hpp"
 
-namespace ref = mundosm::heightmap;
+namespace ref = PYRE_REFERENCE_NS;
 
 namespace {
 

@@ -1,8 +1,14 @@
 # Source readers
 
 The tool reads source rasters through one interface: `pyre::tool::Source` in
-`tools/pyre/source.hpp`. Each format has one reader. The first reader is COG / GeoTIFF
-(`tools/pyre/tiff.cpp`).
+`tools/pyre/source.hpp`. Each format has one reader:
+
+| Reader | Files | What it reads |
+|---|---|---|
+| `TiffSource` (`tiff.cpp`) | `.tif`, `.tiff` | COG / GeoTIFF |
+| `PyreSource` (`pyre_source.cpp`) | `.pyre`, `.pyre#K` | One grid of a pyre file, so that a pyre archive can stand in for the rasters it was made from |
+
+`openSource` (`source.cpp`) chooses the reader by the file extension.
 
 ## 1. The layers
 
@@ -12,9 +18,9 @@ grid layer    makes the pyre grid and cuts the tiles                    (grid.hp
 codec         encodes and decodes the tiles, writes and reads the file  (include/pyre)
 ```
 
-A reader does not cut tiles. A reader does not resample. Keep these jobs apart. A
-resampler (for example onto the AirKid metre grid) is a later step: it will replace
-`readTile` in the grid layer. The readers and the codec will not change.
+A reader does not cut tiles. A reader does not resample. Keep these jobs apart. The
+resampler (`resample.hpp`, used by `pyre-resample`) sits in the grid layer, in place of
+`readTile`. It uses the readers as they are (section 6).
 
 ## 2. The interface
 
@@ -60,8 +66,7 @@ The rules for a reader:
 2. In the constructor (or a static `open`), read the metadata and fill `SourceInfo`.
    Throw `SourceError` with a clear message if the file is not valid.
 3. Write `readWindow`. Convert each sample to `double`.
-4. Add the file extension to `openSource` (in `tiff.cpp` now; move it to its own
-   `source.cpp` when a second reader comes).
+4. Add the file extension to `openSource` in `source.cpp`.
 5. Add the `.cpp` to the `pyretool` library in `CMakeLists.txt`.
 6. Add `tests/test_<format>.cpp`: small files made by the test, windows, no-data, and
    damaged files.
@@ -79,12 +84,56 @@ The rules for a reader:
 | NetCDF, Zarr | Need libraries (netCDF/HDF5, a JSON parser and a codec for Zarr). Keep them optional in CMake. |
 | Copernicus DEM | COG: the GeoTIFF reader reads it now. |
 | LERC | Needs the LERC library (Apache-2.0). Optional in CMake. |
-| mundosm `.alt` | The reference packs. A reader decodes a tile with `heightmap.hpp` and gives the AirKid metre grid: projected CRS, PixelIsPoint, 2 m. Use it to convert the reference packs. |
+| Reference `.alt` packs | Format 3 heights packs (magic `MALT`). `tools/pyre/alt.hpp` reads them now and decodes a tile with pyre's reference method (`Method::reference()`, the same streams); `pyre compare` uses it. A `Source` on top of it (to convert the packs) is still to do. |
 
 ## 5. More than one source
 
 One source is one grid of the file. Each tile belongs to one grid. Tiles start at the
 source's south-west pixel. `pyre encode` takes many sources and writes one grid for
 each. It does not check whether two sources overlap: the MDT02 sheets overlap by about
-250 m, and both copies are stored. A later resampler will put many sources onto one
-grid.
+250 m, and both copies are stored. To put many sources onto one grid, use
+`pyre-resample` (section 6).
+
+## 6. The resampler
+
+`pyre-resample` puts many geographic sources onto one local metre grid. Its parts:
+
+| File | What it does |
+|---|---|
+| `tools/pyre/local.hpp` | `LocalGrid`: the projection round a centre point, and its WKT. |
+| `tools/pyre/resample.hpp`, `.cpp` | `SheetSet`: reads the headers of the sources, opens them when a tile needs them, and samples a square of nodes. |
+| `tools/pyre/overlay.hpp`, `.cpp` | `Overlay`: rasters on the grid whose values replace the samples. |
+| `tools/pyre/tile_epsilon.hpp`, `.cpp` | The per-tile ε: from a file of tiles and boxes, or from a pack. |
+| `tools/pyre-resample/main.cpp` | The tool: chooses the tiles, samples, applies the overlays, encodes and checks. |
+
+The rules of `SheetSet::sample`:
+
+1. It computes the degrees of each column and each row of nodes (on this grid, the
+   longitude depends on x only and the latitude on y only).
+2. It finds the sources whose box of pixel centres touches the square. It reads one
+   window from each of them.
+3. For each node, it orders those sources by the margin: the distance in pixels from
+   the node to the nearest edge of the box. The largest margin comes first. On a tie,
+   the first path comes first.
+4. It takes the first source whose 4 pixels round the node all have data. It
+   interpolates bilinearly in double and rounds the result to float.
+5. A pixel has no data if it is the source's no-data value, NaN, infinite, or less than
+   −1000 m.
+
+A source for the resampler must be geographic (`ModelType::Geographic`) and have rows
+going south. Any reader of section 3 can give it. A source in a projected CRS needs a
+CRS transform first; that is not done.
+
+## 7. A pyre file as a source
+
+`PyreSource` reads one grid of a pyre file as a raster:
+
+- The path is `file.pyre` (a file with one grid) or `file.pyre#K` (grid K). `SheetSet`
+  gives each grid of a file its own source, in the order of the grids.
+- Pixel (0, 0) is the grid's north-west node. The georeference is the grid's.
+- A value is the float32 nearest to height × unit, as a float32 raster holds it. So a
+  float32 source whose values are whole quanta, encoded with that unit and ε = 0, reads
+  back bit for bit. The MDT02 values are whole millimetres: use `--unit 0.001`.
+- A hole, or a node of a tile that is not in the file, reads as NaN.
+- It decodes whole tiles and keeps the last 16 (an LRU cache). It checks each tile's CRC
+  before it decodes it.

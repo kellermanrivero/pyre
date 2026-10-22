@@ -185,6 +185,7 @@ public:
     Status add(std::uint32_t grid, std::int32_t ti, std::int32_t tj, const EncodedTile& t, std::int32_t d) {
         if (!sink_) return Status::Usage;
         if (grid >= info_.grids.size() || t.blocks.size() != info_.params.blocks()) return Status::Usage;
+        if (d < 0 || d > kMaxError) return Status::BadInput;
         const std::uint64_t total = t.bytes();
         if (total > 0xFFFFFFFFu) return Status::BadInput;
         TileEntry e;

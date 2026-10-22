@@ -33,7 +33,10 @@ GridInfo gridOf(const SourceInfo& s, const Params& p) {
 }
 
 std::int32_t toQuanta(double v, double unit) {
-    const double q = std::round(v / unit);
+    // With a whole number of quanta a unit (100 for 1 cm), v · 100 is one
+    // rounding, where v / 0.01 is two (0.01 has no exact double).
+    const double inverse = std::round(1 / unit);
+    const double q = std::abs(inverse * unit - 1) < 1e-12 ? std::round(v * inverse) : std::round(v / unit);
     if (!(q >= -double(kMaxHeight) && q <= double(kMaxHeight)))
         throw SourceError("height " + std::to_string(v) + " is out of range for the unit " + std::to_string(unit));
     return std::int32_t(q);

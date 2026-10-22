@@ -695,15 +695,4 @@ void TiffSource::readWindow(std::uint32_t col0, std::uint32_t row0, std::uint32_
     }
 }
 
-// ── openSource ───────────────────────────────────────────────────────────────
-
-std::unique_ptr<Source> openSource(const std::string& path) {
-    std::string ext;
-    if (const auto dot = path.find_last_of('.'); dot != std::string::npos && path.find_first_of("/\\", dot) == std::string::npos)
-        ext = path.substr(dot + 1);
-    for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
-    if (ext == "tif" || ext == "tiff") return TiffSource::open(path);
-    throw SourceError(path + ": unknown source format (expected .tif or .tiff)");
-}
-
 }  // namespace pyre::tool

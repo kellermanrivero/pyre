@@ -26,6 +26,27 @@ bool takesValue(const std::string& o) {
     return v.count(o) != 0;
 }
 
+Args parseArgs(int argc, char** argv, int first, const std::function<bool(const std::string&)>& takes) {
+    Args a;
+    for (int k = first; k < argc; ++k) {
+        std::string s = argv[k];
+        if (s == "-o") s = "--output";
+        if (s.size() > 2 && s.compare(0, 2, "--") == 0) {
+            const std::string name = s.substr(2);
+            if (takes(name)) {
+                if (k + 1 >= argc) throw std::runtime_error("--" + name + " needs a value");
+                a.options[name] = argv[++k];
+                a.all[name].push_back(argv[k]);
+            } else {
+                a.options[name] = "1";
+            }
+        } else {
+            a.positional.push_back(s);
+        }
+    }
+    return a;
+}
+
 double Args::number(const std::string& k, double def) const {
     if (!has(k)) return def;
     const std::string s = get(k);
@@ -71,8 +92,6 @@ void parallelFor(std::size_t n, unsigned threads, const std::function<void(std::
     if (error) std::rethrow_exception(error);
 }
 
-namespace {
-
 Params paramsOf(const Args& a) {
     Params p;
     p.tile = a.count("tile", 1000);
@@ -87,12 +106,12 @@ Params paramsOf(const Args& a) {
     return p;
 }
 
-BBox bboxOf(const Args& a) {
+BBox bboxOf(const Args& a, const std::string& name) {
     BBox b;
-    if (!a.has("bbox")) return b;
+    if (!a.has(name)) return b;
     double v[4];
-    if (std::sscanf(a.get("bbox").c_str(), "%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3]) != 4 || v[0] > v[2] || v[1] > v[3])
-        throw std::runtime_error("--bbox needs minX,minY,maxX,maxY");
+    if (std::sscanf(a.get(name).c_str(), "%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3]) != 4 || v[0] > v[2] || v[1] > v[3])
+        throw std::runtime_error("--" + name + " needs minX,minY,maxX,maxY");
     b.minX = v[0];
     b.minY = v[1];
     b.maxX = v[2];
@@ -103,6 +122,8 @@ BBox bboxOf(const Args& a) {
 void need(Status s, const char* what) {
     if (s != Status::Ok) throw std::runtime_error(std::string(what) + ": " + toString(s));
 }
+
+namespace {
 
 std::string crsText(const GridInfo& g) {
     if (g.epsg) return "EPSG:" + std::to_string(g.epsg);
@@ -220,38 +241,11 @@ int cmdInfo(const Args& a) {
 
 // ── encode ───────────────────────────────────────────────────────────────────
 
-int cmdEncode(const Args& a) {
-    if (a.positional.empty() || !a.has("output")) throw std::runtime_error("usage: pyre encode <sources…> -o <out.pyre>");
-    const Params p = paramsOf(a);
-    const double unit = a.number("unit", 0.01);
-    if (!(unit >= 0.001 && unit <= 1)) throw std::runtime_error("--unit must be from 0.001 to 1");
-    const std::int32_t d = errorQuanta(a.number("epsilon", 0.99), unit);
-    const BBox box = bboxOf(a);
-    const unsigned threads = threadsOf(a);
+EncodeTotals encodeToFile(const FileInfo& info, const std::vector<TileJob>& jobs, const TileReader& read,
+                          const TileCheck& check, unsigned threads, const std::string& path) {
     const auto t0 = std::chrono::steady_clock::now();
-
-    std::vector<std::unique_ptr<Source>> sources;
-    FileInfo info;
-    info.params = p;
-    info.method = Method::v1();
-    info.d = d;
-    info.unit = unit;
-    struct Job {
-        std::uint32_t grid, ti, tj;
-    };
-    std::vector<Job> jobs;
-    for (const auto& path : a.positional) {
-        sources.push_back(openSource(path));
-        const SourceInfo& s = sources.back()->info();
-        if (sources.size() == 1 && s.noData) info.noData = *s.noData;
-        info.grids.push_back(gridOf(s, p));
-        const GridInfo& g = info.grids.back();
-        for (std::uint32_t tj = 0; tj < g.tilesY; ++tj)
-            for (std::uint32_t ti = 0; ti < g.tilesX; ++ti)
-                if (tileTouches(g, p, std::int32_t(ti), std::int32_t(tj), box)) jobs.push_back({std::uint32_t(info.grids.size() - 1), ti, tj});
-    }
-
-    FileSink sink(a.get("output"));
+    const Params& p = info.params;
+    FileSink sink(path);
     Builder builder;
     need(builder.begin(info, sink), "cannot start the file");
 
@@ -261,53 +255,89 @@ int cmdEncode(const Args& a) {
     std::vector<char> ready(jobs.size(), 0);
     std::mutex m;
     std::size_t next = 0;
-    std::uint64_t valid = 0, skipped = 0;
+    EncodeTotals totals;
     Status addStatus = Status::Ok;
     parallelFor(jobs.size(), threads, [&](std::size_t k) {
-        const Job& job = jobs[k];
-        std::vector<std::int32_t> x;
-        std::vector<std::uint8_t> v;
-        std::vector<double> buf;
-        const std::size_t count = readTile(*sources[job.grid], p, unit, job.ti, job.tj, x, v, buf);
+        const TileJob& job = jobs[k];
+        TileData data;
+        const std::size_t count = read(job, data);
         std::optional<EncodedTile> t;
         if (count > 0) {
             t.emplace();
-            need(encodeTile(p, info.method, d, x, count == p.nodes() ? std::span<const std::uint8_t>{} : std::span<const std::uint8_t>(v), *t),
-                 "cannot encode a tile");
+            std::vector<std::int32_t> recon(check ? p.nodes() : 0);
+            const auto valid = count == p.nodes() ? std::span<const std::uint8_t>{} : std::span<const std::uint8_t>(data.valid);
+            need(encodeTile(p, info.method, job.errorOr(info.d), data.x, valid, *t, recon), "cannot encode a tile");
+            if (check) check(job, data, *t, recon);
         }
         std::lock_guard<std::mutex> lock(m);
         done[k] = std::move(t);
         ready[k] = 1;
         while (next < jobs.size() && ready[next]) {
             if (done[next]) {
-                valid += done[next]->valid;
+                totals.validNodes += done[next]->valid;
                 if (addStatus == Status::Ok)
-                    addStatus = builder.add(jobs[next].grid, std::int32_t(jobs[next].ti), std::int32_t(jobs[next].tj), *done[next], d);
+                    addStatus = builder.add(jobs[next].grid, jobs[next].ti, jobs[next].tj, *done[next], jobs[next].errorOr(info.d));
                 done[next].reset();
             } else {
-                ++skipped;
+                ++totals.emptyTiles;
             }
             ++next;
         }
     });
     need(addStatus, "cannot write a tile");
-    const std::size_t tiles = builder.tiles();
+    totals.tiles = builder.tiles();
     need(builder.finish(), "cannot finish the file");
-    if (!sink.close()) throw std::runtime_error("cannot write " + a.get("output"));
-    const double secs = seconds(t0, std::chrono::steady_clock::now());
-    const std::uint64_t bytes = MappedFile(a.get("output")).bytes().size();
+    if (!sink.close()) throw std::runtime_error("cannot write " + path);
+    totals.seconds = seconds(t0, std::chrono::steady_clock::now());
+    totals.bytes = MappedFile(path).bytes().size();
+    return totals;
+}
+
+int cmdEncode(const Args& a) {
+    if (a.positional.empty() || !a.has("output")) throw std::runtime_error("usage: pyre encode <sources…> -o <out.pyre>");
+    const Params p = paramsOf(a);
+    const double unit = a.number("unit", 0.01);
+    if (!(unit >= 0.001 && unit <= 1)) throw std::runtime_error("--unit must be from 0.001 to 1");
+    const std::int32_t d = errorQuanta(a.number("epsilon", 0.99), unit);
+    const BBox box = bboxOf(a);
+    const unsigned threads = threadsOf(a);
+
+    std::vector<std::unique_ptr<Source>> sources;
+    FileInfo info;
+    info.params = p;
+    info.method = Method::v1();
+    info.d = d;
+    info.unit = unit;
+    std::vector<TileJob> jobs;
+    for (const auto& path : a.positional) {
+        sources.push_back(openSource(path));
+        const SourceInfo& s = sources.back()->info();
+        if (sources.size() == 1 && s.noData) info.noData = *s.noData;
+        info.grids.push_back(gridOf(s, p));
+        const GridInfo& g = info.grids.back();
+        for (std::uint32_t tj = 0; tj < g.tilesY; ++tj)
+            for (std::uint32_t ti = 0; ti < g.tilesX; ++ti)
+                if (tileTouches(g, p, std::int32_t(ti), std::int32_t(tj), box))
+                    jobs.push_back({std::uint32_t(info.grids.size() - 1), std::int32_t(ti), std::int32_t(tj)});
+    }
+
+    const auto read = [&](const TileJob& job, TileData& t) {
+        std::vector<double> buf;
+        return readTile(*sources[job.grid], p, unit, std::uint32_t(job.ti), std::uint32_t(job.tj), t.x, t.valid, buf);
+    };
+    const EncodeTotals r = encodeToFile(info, jobs, read, {}, threads, a.get("output"));
+    const double bits = r.validNodes ? double(r.bytes) * 8 / double(r.validNodes) : 0.0;
 
     if (a.has("json")) {
         Json j;
-        j.add("output", a.get("output")).add("sources", std::uint64_t(sources.size())).add("tiles", std::uint64_t(tiles));
-        j.add("empty_tiles", skipped).add("valid_nodes", valid).add("bytes", bytes);
-        j.add("bits_per_valid_node", valid ? double(bytes) * 8 / double(valid) : 0.0).add("seconds", secs).add("threads", threads);
+        j.add("output", a.get("output")).add("sources", std::uint64_t(sources.size())).add("tiles", std::uint64_t(r.tiles));
+        j.add("empty_tiles", std::uint64_t(r.emptyTiles)).add("valid_nodes", r.validNodes).add("bytes", r.bytes);
+        j.add("bits_per_valid_node", bits).add("seconds", r.seconds).add("threads", threads);
         j.add("epsilon", d * unit).add("unit", unit);
         std::printf("%s\n", j.str().c_str());
     } else {
-        std::printf("wrote %s: %zu tiles (%llu empty, not stored) from %zu sources, %llu bytes, %.4f bits a valid node, %.2f s on %u threads\n",
-                    a.get("output").c_str(), tiles, (unsigned long long)skipped, sources.size(), (unsigned long long)bytes,
-                    valid ? double(bytes) * 8 / double(valid) : 0.0, secs, threads);
+        std::printf("wrote %s: %zu tiles (%zu empty, not stored) from %zu sources, %llu bytes, %.4f bits a valid node, %.2f s on %u threads\n",
+                    a.get("output").c_str(), r.tiles, r.emptyTiles, sources.size(), (unsigned long long)r.bytes, bits, r.seconds, threads);
     }
     return 0;
 }
@@ -339,25 +369,29 @@ int cmdDecode(const Args& a) {
     for (std::uint32_t gk : grids) {
         const GridInfo& g = fi.grids[gk];
         // The node range of the box, on the step's lattice.
-        auto clampRange = [&](double lo, double hi, double origin, double spacing, std::uint32_t nodes, std::int64_t& a0, std::int64_t& a1) {
-            a0 = std::isinf(lo) ? 0 : std::int64_t(std::ceil((lo - origin) / spacing - 1e-9));
-            a1 = std::isinf(hi) ? std::int64_t(nodes) - 1 : std::int64_t(std::floor((hi - origin) / spacing + 1e-9));
-            a0 = std::max<std::int64_t>(a0, 0);
-            a1 = std::min<std::int64_t>(a1, std::int64_t(nodes) - 1);
-            a0 = (a0 + step - 1) / step * step;
-            a1 = a1 / step * step;
+        // The grid's nodes are first … first + nodes − 1 (first = the first tile · S).
+        auto floorDiv = [](std::int64_t x, std::int64_t y) { return x >= 0 ? x / y : -((-x + y - 1) / y); };
+        auto clampRange = [&](double lo, double hi, double origin, double spacing, std::int64_t first, std::uint32_t nodes,
+                              std::int64_t& a0, std::int64_t& a1) {
+            a0 = std::isinf(lo) ? first : std::int64_t(std::ceil((lo - origin) / spacing - 1e-9));
+            a1 = std::isinf(hi) ? first + std::int64_t(nodes) - 1 : std::int64_t(std::floor((hi - origin) / spacing + 1e-9));
+            a0 = std::max<std::int64_t>(a0, first);
+            a1 = std::min<std::int64_t>(a1, first + std::int64_t(nodes) - 1);
+            a0 = -floorDiv(-a0, step) * step;
+            a1 = floorDiv(a1, step) * step;
         };
         std::int64_t I0, I1, J0, J1;
-        clampRange(box.minX, box.maxX, g.originX, g.spacingX, g.width, I0, I1);
-        clampRange(box.minY, box.maxY, g.originY, g.spacingY, g.height, J0, J1);
+        clampRange(box.minX, box.maxX, g.originX, g.spacingX, std::int64_t(g.tileI0) * p.tile, g.width, I0, I1);
+        clampRange(box.minY, box.maxY, g.originY, g.spacingY, std::int64_t(g.tileJ0) * p.tile, g.height, J0, J1);
         if (I0 > I1 || J0 > J1) continue;
         const std::uint32_t w = std::uint32_t((I1 - I0) / step + 1), h = std::uint32_t((J1 - J0) / step + 1);
         std::vector<float> img(std::size_t(w) * h, noData);
 
         // The tiles that the range touches.
         std::vector<std::size_t> tiles;
-        for (std::int64_t tj = J0 / p.tile; tj <= std::min<std::int64_t>(J1 / p.tile, g.tilesY - 1); ++tj)
-            for (std::int64_t ti = I0 / p.tile; ti <= std::min<std::int64_t>(I1 / p.tile, g.tilesX - 1); ++ti)
+        const std::int64_t lastI = std::int64_t(g.tileI0) + g.tilesX - 1, lastJ = std::int64_t(g.tileJ0) + g.tilesY - 1;
+        for (std::int64_t tj = floorDiv(J0, p.tile); tj <= std::min<std::int64_t>(floorDiv(J1, p.tile), lastJ); ++tj)
+            for (std::int64_t ti = floorDiv(I0, p.tile); ti <= std::min<std::int64_t>(floorDiv(I1, p.tile), lastI); ++ti)
                 if (auto k = r.find(gk, std::int32_t(ti), std::int32_t(tj))) tiles.push_back(*k);
         std::atomic<std::uint64_t> badTiles{0};
         parallelFor(tiles.size(), threads, [&](std::size_t n) {

@@ -77,7 +77,11 @@ public:
                             double* out) const = 0;
 };
 
-/// Opens a source by its file name; add each new reader here. Throws SourceError.
+/// Opens a source by its file name (source.cpp); add each new reader there.
+/// "file.pyre#K" opens grid K of a pyre file. Throws SourceError.
 std::unique_ptr<Source> openSource(const std::string& path);
+
+/// The extension of a source path, in lower case, without a "#K" suffix.
+std::string sourceExtension(const std::string& path);
 
 }  // namespace pyre::tool

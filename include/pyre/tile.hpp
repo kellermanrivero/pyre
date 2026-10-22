@@ -35,7 +35,7 @@ struct Method {
     Framing framing = Framing::Trimmed;
 
     /// The reference's method: for a tile with no holes, its streams are byte
-    /// for byte those of mundosm's heightmap.hpp (format 3).
+    /// for byte those of the reference heightmap.hpp (format 3).
     static constexpr Method reference() { return Method{Framing::Lzma}; }
     /// pyre v0.1.
     static constexpr Method v1() { return Method{Framing::Trimmed}; }

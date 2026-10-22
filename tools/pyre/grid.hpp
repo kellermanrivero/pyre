@@ -11,8 +11,8 @@
 // the raster's edge are holes. Tiles start at the south-west pixel, so a
 // sheet of W × H pixels has ⌈(W − 1)/S⌉ × ⌈(H − 1)/S⌉ tiles.
 //
-// A later resampler (onto the AirKid grid, for example) replaces only
-// readTile: the reader below it and the codec above it do not change.
+// The resampler (resample.hpp, for pyre-resample) is the other way to make
+// tiles: it takes the place of readTile; the readers and the codec stay.
 
 #include <cmath>
 #include <cstdint>
@@ -27,7 +27,8 @@ namespace pyre::tool {
 /// The grid of the file for one source.
 GridInfo gridOf(const SourceInfo& s, const Params& p);
 
-/// A source value in quanta: round(v / unit). Throws if it is out of range.
+/// A source value in quanta: round(v / unit), as round(v · (1 / unit)) when
+/// 1 / unit is a whole number. Throws if it is out of range.
 std::int32_t toQuanta(double v, double unit);
 
 /// The error limit in quanta for ε in metres: the largest D with D·unit ≤ ε.

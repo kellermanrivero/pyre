@@ -19,12 +19,15 @@ usage:
   pyre decode <file.pyre> -o <out.tif> [--bbox …] [--level STEP] [--grid K] [--nodata V] [--json]
   pyre verify <file.pyre> <sources…> [--threads N] [--json]
   pyre bench <sources…> [--epsilon …] [--unit …] [--tile …] [--block …] [--base …]
-             [--block-levels …] [--threads N] [--reference] [--json]
+             [--block-levels …] [--threads N] [--reference] [--max-tiles N] [--json]
+  pyre compare <file.pyre> <pack.alt> [--grid K] [--threads N] [--json]
 
   --epsilon  the error limit in vertical units (metres); 0 is lossless
   --unit     the height quantum q; the error against the float source is at most ε + q/2
   --level    the pyramid step to decode, in cells: 1 (all), 2, 4 … up to the base step
   --bbox     a rectangle in the CRS of the sources
+  compare    a file made by pyre-resample against a reference heights pack (.alt)
+             on the same local grid: the differences and the sizes
   --json     print one JSON object
 )";
 
@@ -38,23 +41,11 @@ int main(int argc, char** argv) {
     }
     const std::string command = argv[1];
     Args a;
-    for (int k = 2; k < argc; ++k) {
-        std::string s = argv[k];
-        if (s == "-o") s = "--output";
-        if (s.size() > 2 && s.compare(0, 2, "--") == 0) {
-            const std::string name = s.substr(2);
-            if (takesValue(name)) {
-                if (k + 1 >= argc) {
-                    std::fprintf(stderr, "pyre: --%s needs a value\n", name.c_str());
-                    return 2;
-                }
-                a.options[name] = argv[++k];
-            } else {
-                a.options[name] = "1";
-            }
-        } else {
-            a.positional.push_back(s);
-        }
+    try {
+        a = parseArgs(argc, argv, 2, takesValue);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "pyre: %s\n", e.what());
+        return 2;
     }
     try {
         if (command == "info") return cmdInfo(a);
@@ -62,6 +53,7 @@ int main(int argc, char** argv) {
         if (command == "decode") return cmdDecode(a);
         if (command == "verify") return cmdVerify(a);
         if (command == "bench") return cmdBench(a);
+        if (command == "compare") return cmdCompare(a);
         std::fprintf(stderr, "pyre: unknown command '%s'\n%s", command.c_str(), kUsage);
         return 2;
     } catch (const std::exception& e) {

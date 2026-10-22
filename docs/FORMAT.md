@@ -88,8 +88,8 @@ lattice, so each sheet is one grid, and pyre does not resample.
 | 28 | u32, u32 | name | The offset and size of the grid's name (the source file's name). |
 | 36 | u32 | width | The nodes with data across, from node (0, 0). |
 | 40 | u32 | height | The nodes with data up, from node (0, 0). |
-| 44 | i32 | tileI0 | The first tile column (0 for a sheet). |
-| 48 | i32 | tileJ0 | The first tile row (0 for a sheet). |
+| 44 | i32 | tileI0 | The first tile column. 0 for a sheet; can be negative on a local grid (`pyre-resample`). |
+| 48 | i32 | tileJ0 | The first tile row. As tileI0. |
 | 52 | u32 | tilesX | The tile columns. |
 | 56 | u32 | tilesY | The tile rows. |
 | 60 | u32 | — | Reserved. |
@@ -106,7 +106,15 @@ the north-west corner of the node's cell, as in GeoTIFF.
 
 The tiles of a grid: tile (ti, tj) holds the nodes (I, J) with
 ti × S ≤ I ≤ ti × S + S and tj × S ≤ J ≤ tj × S + S. Two neighbour tiles share the
-nodes of their common side.
+nodes of their common side. The tiles of a grid are tileI0 ≤ ti < tileI0 + tilesX and
+tileJ0 ≤ tj < tileJ0 + tilesY. Its nodes are tileI0 × S ≤ I < tileI0 × S + width, and
+the same for J.
+
+A local grid from `pyre-resample` has `epsg` 0, `modelType` 1 and `rasterType` 2. Its
+WKT starts with `PROJCS["pyre local <lat0> <lon0>"`: an equirectangular projection on
+a sphere of 6,371,000 m with its centre at (lat0, lon0). Node (0, 0) is the centre
+(origin 0, 0), and tile (ti, tj) starts at (ti × S × spacing, tj × S × spacing) metres.
+`tools/pyre/local.hpp` gives the exact arithmetic.
 
 ### 3.3 The text
 
@@ -239,7 +247,7 @@ The u32 `method` in the header gives the stream framing:
 
 | Value | Framing |
 |---:|---|
-| 0 | LZMA framing. The streams are byte for byte those of mundosm's `heightmap.hpp` (format 3). For tests and comparison. |
+| 0 | LZMA framing. The streams are byte for byte those of the reference `heightmap.hpp` (format 3). For tests and comparison. |
 | 1 | Trimmed framing (pyre v0.1). The first byte (always 0) is not written. The flush writes the shortest value in the final interval. Trailing zero bytes are cut. The decoder reads zeros past the end. |
 
 With method 1 a decoder cannot see a cut stream by itself. The tile's CRC finds it.
