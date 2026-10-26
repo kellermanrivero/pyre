@@ -4,6 +4,10 @@
 
 #include <zlib.h>
 
+#ifdef PYRE_HAVE_ZSTD
+#include <zstd.h>
+#endif
+
 #include <bit>
 #include <climits>
 #include <cstring>
@@ -72,6 +76,33 @@ void inflateExact(const std::uint8_t* in, std::size_t inSize, std::uint8_t* out,
     }
     throw SourceError(std::string("deflate: bad data (") + (s.msg ? s.msg : "zlib error") + ")");
 }
+
+#ifdef PYRE_HAVE_ZSTD
+bool zstdAvailable() { return true; }
+
+std::uint64_t zstdFrameSize(const std::uint8_t* in, std::size_t inSize) {
+    const unsigned long long n = ZSTD_getFrameContentSize(in, inSize);
+    return n == ZSTD_CONTENTSIZE_UNKNOWN || n == ZSTD_CONTENTSIZE_ERROR ? 0 : std::uint64_t(n);
+}
+
+void zstdDecompressExact(const std::uint8_t* in, std::size_t inSize, std::uint8_t* out, std::size_t outSize) {
+    struct Ctx {
+        ZSTD_DCtx* c = ZSTD_createDCtx();
+        ~Ctx() { ZSTD_freeDCtx(c); }
+    };
+    thread_local Ctx ctx;
+    if (!ctx.c) throw SourceError("zstd: cannot start the decoder");
+    const std::size_t r = ZSTD_decompressDCtx(ctx.c, out, outSize, in, inSize);
+    if (ZSTD_isError(r)) throw SourceError(std::string("zstd: bad data (") + ZSTD_getErrorName(r) + ")");
+    if (r != outSize) throw SourceError("zstd: the block is too short");
+}
+#else
+bool zstdAvailable() { return false; }
+std::uint64_t zstdFrameSize(const std::uint8_t*, std::size_t) { return 0; }
+void zstdDecompressExact(const std::uint8_t*, std::size_t, std::uint8_t*, std::size_t) {
+    throw SourceError("zstd: this build has no ZSTD support (build with PYRE_WITH_ZSTD and libzstd)");
+}
+#endif
 
 void lzwDecodeExact(const std::uint8_t* in, std::size_t inSize, std::uint8_t* out, std::size_t outSize) {
     constexpr unsigned kClear = 256, kEoi = 257, kFirst = 258, kMaxCodes = 4096;

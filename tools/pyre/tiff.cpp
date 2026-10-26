@@ -422,7 +422,9 @@ void TiffSource::Impl::parse() {
                           std::to_string(bits) + " bits)");
     bytesPerSample = unsigned(bits / 8);
 
-    if (compression != 1 && compression != 5 && compression != 8 && compression != 32946)
+    if (compression == 50000 && !tiffcodec::zstdAvailable())
+        throw SourceError(path + ": compression 50000 (ZSTD): this build has no ZSTD support (build with PYRE_WITH_ZSTD and libzstd)");
+    if (compression != 1 && compression != 5 && compression != 8 && compression != 32946 && compression != 50000)
         throw SourceError(path + ": unsupported compression " + std::to_string(compression));
     if (predictor != 1 && predictor != 2 && predictor != 3)
         throw SourceError(path + ": unsupported predictor " + std::to_string(predictor));
@@ -566,8 +568,9 @@ BlockPtr TiffSource::Impl::decodeBlock(std::uint64_t b) const {
     const std::size_t outSize = std::size_t(rows * rowSamples * bytesPerSample);
 
     // Deflate expands at most about 1032:1, LZW less; a larger ratio means a
-    // damaged header, and we stop before the allocation.
-    if (layout.compression != 1 && outSize / 2048 > cnt + 32)
+    // damaged header, and we stop before the allocation. ZSTD can expand far
+    // more (a block of one value); its frame says its size, checked below.
+    if (layout.compression != 1 && layout.compression != 50000 && outSize / 2048 > cnt + 32)
         throw SourceError(file.path() + ": block size does not match its compressed size");
 
     auto blk = std::make_shared<Block>();
@@ -582,10 +585,15 @@ BlockPtr TiffSource::Impl::decodeBlock(std::uint64_t b) const {
         thread_local std::vector<std::uint8_t> packed;
         if (packed.size() < cnt) packed.resize(std::size_t(cnt));
         file.read(offsets[std::size_t(b)], packed.data(), cnt);
-        if (layout.compression == 5)
+        if (layout.compression == 5) {
             tiffcodec::lzwDecodeExact(packed.data(), std::size_t(cnt), out, outSize);
-        else
+        } else if (layout.compression == 50000) {
+            const std::uint64_t said = tiffcodec::zstdFrameSize(packed.data(), std::size_t(cnt));
+            if (said != 0 && said != outSize) throw SourceError(file.path() + ": block size does not match its ZSTD frame");
+            tiffcodec::zstdDecompressExact(packed.data(), std::size_t(cnt), out, outSize);
+        } else {
             tiffcodec::inflateExact(packed.data(), std::size_t(cnt), out, outSize);
+        }
         if (packed.size() > (std::size_t(64) << 20)) std::vector<std::uint8_t>().swap(packed);
     }
 

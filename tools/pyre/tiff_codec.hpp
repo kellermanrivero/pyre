@@ -15,6 +15,16 @@ namespace pyre::tool::tiffcodec {
 /// give exactly outSize bytes.
 void inflateExact(const std::uint8_t* in, std::size_t inSize, std::uint8_t* out, std::size_t outSize);
 
+/// True if this build reads ZSTD (TIFF compression 50000; PYRE_WITH_ZSTD).
+bool zstdAvailable();
+
+/// The decoded size a ZSTD frame says it has, if it says (no frame or no size: 0).
+std::uint64_t zstdFrameSize(const std::uint8_t* in, std::size_t inSize);
+
+/// Decompresses ZSTD frames (TIFF compression 50000). They must give exactly
+/// outSize bytes. Throws SourceError, also when this build has no ZSTD.
+void zstdDecompressExact(const std::uint8_t* in, std::size_t inSize, std::uint8_t* out, std::size_t outSize);
+
 /// Decodes TIFF LZW (compression 5: codes MSB first, 9 to 12 bits, early
 /// change). The output must be exactly outSize bytes; data after the last
 /// needed code is ignored.

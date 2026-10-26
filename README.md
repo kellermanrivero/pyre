@@ -29,6 +29,7 @@ codec is lossless on the rounded values.
 ## Build
 
 You need CMake 3.20 or later, a C++20 compiler and zlib (zlib is for the tool only).
+libzstd is optional (the tool's reader of ZSTD TIFFs).
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -41,6 +42,7 @@ cd build && ctest
 | `PYRE_BUILD_TOOL` | ON | Build the `pyre` tool. |
 | `PYRE_BUILD_TESTS` | ON | Build the tests. |
 | `PYRE_SANITIZE` | OFF | Build with AddressSanitizer and UndefinedBehaviorSanitizer. |
+| `PYRE_WITH_ZSTD` | ON | Read TIFF ZSTD compression (50000, as GDAL writes it) in the tool, if libzstd is found. Without it, such a file is refused with the reason. The codec never needs it. |
 | `PYRE_REFERENCE_DIR` | empty | The folder of the reference `heightmap.hpp` (read only). |
 | `PYRE_REFERENCE_NAMESPACE` | empty | The C++ namespace of the reference. If you set both and the header is there, `pyre bench --reference` and `test_reference` compare with it. |
 
@@ -67,8 +69,8 @@ pyre encode <surface rasters…> --layer-of <file.pyre> --kind 1 [--unit 3] [--m
 
 Each command takes `--json` and then prints one JSON object.
 
-- `encode` reads COG / GeoTIFF sources (TIFF and BigTIFF; strips and tiles; Deflate, LZW
-  or none; predictors 1, 2, 3; int16, int32, float32, float64). Each source becomes one
+- `encode` reads COG / GeoTIFF sources (TIFF and BigTIFF; strips and tiles; Deflate, LZW,
+  ZSTD (with libzstd) or none; predictors 1, 2, 3; int16, int32, float32, float64). Each source becomes one
   grid of the file, on its own lattice, with no resampling.
 - `decode` writes a float32 GeoTIFF. `--level` is a pyramid step in cells (1, 2, 4 … up
   to the base step). It is not in metres, because a source can be in degrees.

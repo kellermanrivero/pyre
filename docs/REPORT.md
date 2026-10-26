@@ -108,6 +108,7 @@ the tool output on an Apple M1 Pro (10 cores), macOS, Apple clang 21, CMake 4.4.
 | The C++20 standard library | The codec, the tool | — |
 | zlib | The tool only | Deflate in the TIFF reader and writer. The macOS SDK has it. Nothing was downloaded. |
 | Threads (pthreads) | The tool only | Encode and decode on many threads. |
+| libzstd | The tool only, optional (`PYRE_WITH_ZSTD`) | TIFF ZSTD (compression 50000). Found with CMake (Homebrew's zstd 1.5.7 here). |
 | CMake 3.20 or later, CTest | The build | — |
 | The reference `heightmap.hpp` | Optional, read only | `test_reference` and `bench --reference`. Set `PYRE_REFERENCE_DIR` and `PYRE_REFERENCE_NAMESPACE`. |
 

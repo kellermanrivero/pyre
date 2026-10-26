@@ -7,7 +7,8 @@
 // The reader:
 // - TIFF and BigTIFF, little-endian (II) and big-endian (MM).
 // - Strips and tiles. One band (SamplesPerPixel 1).
-// - Compression: none (1), LZW (5), Deflate (8 and 32946).
+// - Compression: none (1), LZW (5), Deflate (8 and 32946), and ZSTD (50000)
+//   when the build has libzstd (PYRE_WITH_ZSTD).
 // - Predictor: 1, 2 (horizontal differencing) and 3 (floating point).
 // - Samples: uint8, int16, uint16, int32, uint32, float32, float64.
 // - It uses the first full-resolution image and ignores overviews and masks.
@@ -37,7 +38,7 @@ struct TiffLayout {
     /// The block size: the tile size, or (image width × RowsPerStrip) for strips.
     std::uint32_t blockWidth = 0, blockHeight = 0;
     std::uint32_t blocksAcross = 0, blocksDown = 0;
-    std::uint16_t compression = 1;     ///< 1 none, 5 LZW, 8 or 32946 Deflate
+    std::uint16_t compression = 1;     ///< 1 none, 5 LZW, 8 or 32946 Deflate, 50000 ZSTD
     std::uint16_t predictor = 1;       ///< 1, 2 or 3
     std::uint16_t bitsPerSample = 0;
     std::uint64_t ifdOffset = 0;       ///< the offset of the IFD that is read

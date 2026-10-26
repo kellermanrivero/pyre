@@ -6,6 +6,9 @@
 
 #include <unistd.h>
 #include <zlib.h>
+#ifdef PYRE_HAVE_ZSTD
+#include <zstd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -117,6 +120,23 @@ std::vector<std::uint8_t> zlibCompress(const std::vector<std::uint8_t>& in) {
     compress2(out.data(), &len, in.data(), uLong(in.size()), 9);
     out.resize(len);
     return out;
+}
+
+#ifdef PYRE_HAVE_ZSTD
+std::vector<std::uint8_t> zstdCompress(const std::vector<std::uint8_t>& in) {
+    std::vector<std::uint8_t> out(ZSTD_compressBound(in.size()));
+    out.resize(ZSTD_compress(out.data(), out.size(), in.data(), in.size(), 9));
+    return out;
+}
+#endif
+
+/// The compressions to test: ZSTD too when the build has it.
+std::vector<std::uint16_t> compressions() {
+    std::vector<std::uint16_t> c = {1, 5, 8, 32946};
+#ifdef PYRE_HAVE_ZSTD
+    c.push_back(50000);
+#endif
+    return c;
 }
 
 /// TIFF LZW as libtiff writes it: a clear code first; codes MSB first; the
@@ -332,6 +352,9 @@ std::vector<std::uint8_t> encodeBlock(const Spec& s, const std::vector<double>& 
     }
     if (s.compression == 5) return lzwCompress(raw);
     if (s.compression == 8 || s.compression == 32946) return zlibCompress(raw);
+#ifdef PYRE_HAVE_ZSTD
+    if (s.compression == 50000) return zstdCompress(raw);
+#endif
     return raw;
 }
 
@@ -606,7 +629,7 @@ TEST(hand_built_matrix) {
                                 SampleType::U32, SampleType::F32, SampleType::F64};
     int files = 0, failed = 0;
     for (SampleType t : types)
-        for (std::uint16_t comp : {std::uint16_t(1), std::uint16_t(5), std::uint16_t(8), std::uint16_t(32946)})
+        for (std::uint16_t comp : compressions())
             for (std::uint16_t pred : {std::uint16_t(1), std::uint16_t(2), std::uint16_t(3)}) {
                 if (pred == 3 && sampleFormat(t) != 3) continue;
                 for (bool tiled : {false, true})
@@ -645,9 +668,49 @@ TEST(hand_built_matrix) {
                         }
             }
     std::printf("  %d hand-built files\n", files);
-    CHECK(files == 7 * 4 * 2 * 8 + 2 * 4 * 8);
+    const int nc = int(compressions().size());
+    CHECK(files == 7 * nc * 2 * 8 + 2 * nc * 8);
     CHECK(failed == 0);
 }
+
+#ifdef PYRE_HAVE_ZSTD
+/// A block of one value compresses far past Deflate's 1032:1; ZSTD must still read it.
+TEST(zstd_constant_block) {
+    Spec s;
+    s.type = SampleType::F32;
+    s.compression = 50000;
+    s.tiled = true;
+    s.width = 256;
+    s.height = 256;
+    s.blockW = s.blockH = 256;   // one tile of 256 KB: thousands of times smaller in ZSTD
+    std::vector<double> vals(std::size_t(s.width) * s.height, 612.5);
+    TempFile f("zstd_const.tif");
+    const auto bytes = buildFile(s, vals);
+    // The tile alone: 256 KB in less than 96 bytes, which the guard for Deflate
+    // (more than 2048:1 is damage) would have refused.
+    const std::vector<std::uint8_t> tile(256 * 256 * 4, 0x44);
+    CHECK(zstdCompress(tile).size() < 96);
+    f.write(bytes);
+    auto src = TiffSource::open(f.path);
+    CHECK(src->layout().compression == 50000);
+    CHECK(readsBack(*src, vals));
+}
+#else
+TEST(zstd_refused_without_support) {
+    // Hand-made: a file that says compression 50000 is refused with the reason.
+    Spec s;
+    s.compression = 50000;
+    TempFile f("zstd_none.tif");
+    f.write(buildFile(s, testValues(s.type, s.width, s.height, 1)));
+    bool said = false;
+    try {
+        TiffSource::open(f.path);
+    } catch (const SourceError& e) {
+        said = std::string(e.what()).find("ZSTD") != std::string::npos;
+    }
+    CHECK(said);
+}
+#endif
 
 TEST(lzw_long_data) {
     // Enough codes to grow to 12 bits and to fill the table several times.
@@ -828,11 +891,15 @@ TEST(truncated_files_throw) {
         writeGeoTiff(f.path, w, h, data.data(), g, -32767.0);
         files.push_back(readAll(f.path));
     }
-    for (std::uint16_t comp : {std::uint16_t(5), std::uint16_t(8)}) {
+    std::vector<std::uint16_t> truncComps = {5, 8};
+#ifdef PYRE_HAVE_ZSTD
+    truncComps.push_back(50000);
+#endif
+    for (std::uint16_t comp : truncComps) {
         Spec s;
         s.compression = comp;
         s.predictor = 2;
-        s.tiled = comp == 8;
+        s.tiled = comp != 5;
         s.bigTiff = comp == 5;
         s.bigEndian = comp == 5;
         files.push_back(buildFile(s, testValues(s.type, s.width, s.height, comp)));
@@ -863,11 +930,15 @@ TEST(damaged_files_do_not_crash) {
         writeGeoTiff(f.path, w, h, data.data(), g, -32767.0);
         files.push_back(readAll(f.path));
     }
-    for (std::uint16_t comp : {std::uint16_t(1), std::uint16_t(5), std::uint16_t(8)}) {
+    std::vector<std::uint16_t> damageComps = {1, 5, 8};
+#ifdef PYRE_HAVE_ZSTD
+    damageComps.push_back(50000);
+#endif
+    for (std::uint16_t comp : damageComps) {
         Spec s;
         s.type = comp == 1 ? SampleType::I16 : SampleType::F32;
         s.compression = comp;
-        s.predictor = comp == 8 ? 3 : 2;
+        s.predictor = comp == 8 || comp == 50000 ? 3 : 2;
         s.tiled = comp != 5;
         s.bigTiff = comp == 5;
         s.bigEndian = comp == 1;
