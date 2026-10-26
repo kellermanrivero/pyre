@@ -132,6 +132,18 @@ The 8 test sheets, from the 9 cm archive, with the MDS02 (default options):
 `verify --layer` checked every layer node against the MDS02 again: no error. The
 surface model has trees as well as buildings, so kind 1 has both.
 
+All of Spain (`scripts/add-layer.sh` on the 9 cm archive, 22 Oct 2026): all 4000 files
+got the layer, none failed. The archive grew from 28,235,702,764 to 32,533,185,652 bytes
+(+15.2 %; the layers are 4,266,935,497 bytes, 0.7431 bits a layer node). Of the
+45,935,629,577 layer nodes, 13,014,965,445 (28.3 %) are objects of 3 m or more.
+`verify --layer` checked all of them: no error.
+
+38 sheets have an MDS02 sheet and no MDT02 sheet, and sheet 1057-3 has a damaged MDT02
+TIFF. For these 39 the archive keeps the surface model as the heights (layer 0), with
+no layer: `MDS02_WGS84_PM-2_<sheet>.pyre`, 274,915,736 bytes, verified (1,116,469,445
+nodes, max error 9 quanta). Their heights are the top of buildings and trees, not the
+ground. Do not run `scripts/add-layer.sh` on them: it would add a layer of zeros.
+
 ## Resampling onto a local metre grid: `pyre-resample`
 
 `pyre encode` keeps each source on its own lattice. `pyre-resample` is a separate tool.
